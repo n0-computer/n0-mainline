@@ -742,32 +742,48 @@ fn bytes_to_peers<T: AsRef<[serde_bytes::ByteBuf]>>(
     bytes.iter().map(bytes_to_sockaddr).collect()
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 /// Mainline crate error enum.
 pub enum DecodeMessageError {
-    #[error("Expected message to be longer than 15 characters")]
     TooShort,
-
-    #[error("Expected message to start with 'd'")]
     NotBencodeDictionary,
-
-    #[error("Wrong number of bytes for nodes")]
     InvalidNodes4,
-
-    #[error("wrong number of bytes for port")]
     InvalidPortEncoding,
-
-    #[error("IPv6 is not yet implemented")]
     Ipv6Unsupported,
-
-    #[error("Wrong number of bytes for sockaddr")]
     InvalidSocketAddrEncodingLength,
+    BencodeError(serde_bencode::Error),
+    InvalidIdSize(InvalidIdSize),
+}
 
-    #[error("Failed to parse packet bytes: {0}")]
-    BencodeError(#[from] serde_bencode::Error),
+impl std::fmt::Display for DecodeMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooShort => write!(f, "Expected message to be longer than 15 characters"),
+            Self::NotBencodeDictionary => write!(f, "Expected message to start with 'd'"),
+            Self::InvalidNodes4 => write!(f, "Wrong number of bytes for nodes"),
+            Self::InvalidPortEncoding => write!(f, "wrong number of bytes for port"),
+            Self::Ipv6Unsupported => write!(f, "IPv6 is not yet implemented"),
+            Self::InvalidSocketAddrEncodingLength => {
+                write!(f, "Wrong number of bytes for sockaddr")
+            }
+            Self::BencodeError(e) => write!(f, "Failed to parse packet bytes: {e}"),
+            Self::InvalidIdSize(e) => e.fmt(f),
+        }
+    }
+}
 
-    #[error(transparent)]
-    InvalidIdSize(#[from] InvalidIdSize),
+impl std::error::Error for DecodeMessageError {}
+
+impl From<serde_bencode::Error> for DecodeMessageError {
+    fn from(e: serde_bencode::Error) -> Self {
+        Self::BencodeError(e)
+    }
+}
+
+impl From<InvalidIdSize> for DecodeMessageError {
+    fn from(e: InvalidIdSize) -> Self {
+        Self::InvalidIdSize(e)
+    }
 }
 
 #[cfg(test)]

@@ -16,7 +16,8 @@ struct Cli {
     public_key: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         // Switch to DEBUG to see incoming values and the IP of the responding nodes
         .with_max_level(Level::INFO)
@@ -30,16 +31,16 @@ fn main() {
     println!("Looking up mutable item: {} ...", cli.public_key);
 
     println!("\n=== COLD LOOKUP ===");
-    get_first(&dht, &public_key);
+    get_first(&dht, &public_key).await;
 
     println!("\n=== SUBSEQUENT LOOKUP ===");
-    get_first(&dht, &public_key);
+    get_first(&dht, &public_key).await;
 
     println!("\n=== GET MOST RECENT ===");
     let start = Instant::now();
 
     println!("\nLooking up the most recent value..");
-    let item = dht.get_mutable_most_recent(&public_key, None);
+    let item = dht.get_mutable_most_recent(&public_key, None).await;
 
     if let Some(item) = item {
         println!("Found the most recent value:");
@@ -54,9 +55,10 @@ fn main() {
     );
 }
 
-fn get_first(dht: &Dht, public_key: &[u8; 32]) {
+async fn get_first(dht: &Dht, public_key: &[u8; 32]) {
     let start = Instant::now();
-    if let Some(item) = dht.get_mutable(public_key, None, None).next() {
+    let mut stream = dht.get_mutable(public_key, None, None);
+    if let Some(item) = stream.next().await {
         println!(
             "\nGot first result in {:?} milliseconds:",
             start.elapsed().as_millis()

@@ -1,7 +1,8 @@
 use mainline::{Dht, Id};
 use tracing::Level;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     let dht = Dht::client().unwrap();
@@ -9,9 +10,9 @@ fn main() {
     println!("Calculating Dht size by sampling random lookup queries..",);
 
     for lookups in 1.. {
-        let _ = dht.find_node(Id::random());
+        let _ = dht.find_node(Id::random()).await;
 
-        let info = dht.info();
+        let info = dht.info().await;
         let (estimate, std_dev) = info.dht_size_estimate();
 
         println!(
@@ -21,7 +22,7 @@ fn main() {
             (std_dev * 2.0) * 100.0
         );
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 

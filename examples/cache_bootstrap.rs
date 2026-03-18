@@ -13,7 +13,8 @@ use mainline::Dht;
 use tracing::Level;
 use tracing_subscriber;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
@@ -42,9 +43,9 @@ fn main() {
 
     let client = builder.build().unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let bootstrap = client.to_bootstrap();
+    let bootstrap = client.to_bootstrap().await;
 
     let bootstrap_content = bootstrap.join("\n");
     let mut file = fs::File::create(&nodes_file).expect("Failed to save bootstrapping nodes");

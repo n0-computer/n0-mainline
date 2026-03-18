@@ -14,7 +14,8 @@ impl RequestFilter for Filter {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     let client = Dht::builder()
@@ -26,9 +27,9 @@ fn main() {
         .build()
         .unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let info = client.info();
+    let info = client.info().await;
 
     println!("{:?}", info);
 

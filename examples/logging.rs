@@ -1,9 +1,9 @@
 use colored::*;
 use mainline::Dht;
 use std::{
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::time::sleep;
 use tracing::{debug, enabled, info, Level, Subscriber};
 use tracing_subscriber::{
     fmt::{format::Writer, FmtContext, FormatEvent, FormatFields},
@@ -512,7 +512,8 @@ fn format_socket_validation(msg: &str) -> String {
     format!("[{}] {}", "SOCKET VALIDATION".magenta().bold(), msg)
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Configure logging with our custom formatter
     tracing_subscriber::fmt()
         .with_max_level(Level::TRACE)
@@ -533,13 +534,13 @@ fn main() {
     DhtLogger::info("DHT server node is running! Press Ctrl+C to stop.");
     // Wait for bootstrap to complete
     DhtLogger::info("Waiting for bootstrap...");
-    dht.bootstrapped();
+    dht.bootstrapped().await;
     DhtLogger::info("Bootstrap complete!");
 
     // Keep the program running and show periodic information
     loop {
-        thread::sleep(Duration::from_secs(30));
-        let info = dht.info();
+        sleep(Duration::from_secs(30)).await;
+        let info = dht.info().await;
 
         // Header
         DhtLogger::info(""); // Blank line to separate

@@ -16,7 +16,8 @@ struct Cli {
     value: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     let cli = Cli::parse();
@@ -32,19 +33,19 @@ fn main() {
     );
 
     println!("\n=== COLD QUERY ===");
-    put(&dht, &signer, cli.value.as_bytes(), None);
+    put(&dht, &signer, cli.value.as_bytes(), None).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
     // You can now republish to the same closest nodes
     // skipping the the lookup step.
-    put(&dht, &signer, cli.value.as_bytes(), None);
+    put(&dht, &signer, cli.value.as_bytes(), None).await;
 }
 
-fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
+async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
     let start = Instant::now();
 
     let (item, cas) = if let Some(most_recent) =
-        dht.get_mutable_most_recent(signer.verifying_key().as_bytes(), salt)
+        dht.get_mutable_most_recent(signer.verifying_key().as_bytes(), salt).await
     {
         // 1. Optionally Create a new value to take the most recent's value in consideration.
         let mut new_value = most_recent.value().to_vec();
@@ -71,7 +72,7 @@ fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
         (MutableItem::new(signer.clone(), value, 1, salt), None)
     };
 
-    dht.put_mutable(item, cas).unwrap();
+    dht.put_mutable(item, cas).await.unwrap();
 
     println!(
         "Stored mutable data as {:?} in {:?} milliseconds",

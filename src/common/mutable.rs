@@ -151,17 +151,30 @@ pub fn encode_signable(seq: i64, value: &[u8], salt: Option<&[u8]>) -> Box<[u8]>
     signable.into()
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 /// Mainline crate error enum.
 pub enum MutableError {
-    #[error("Invalid mutable item signature")]
     /// Invalid mutable item signature
     InvalidMutableSignature,
 
-    #[error("Invalid mutable item public key")]
     /// Invalid mutable item public key
     InvalidMutablePublicKey,
 }
+
+impl std::fmt::Display for MutableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MutableError::InvalidMutableSignature => {
+                write!(f, "Invalid mutable item signature")
+            }
+            MutableError::InvalidMutablePublicKey => {
+                write!(f, "Invalid mutable item public key")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MutableError {}
 
 impl PutMutableRequestArguments {
     /// Create a [PutMutableRequestArguments] from a [MutableItem],

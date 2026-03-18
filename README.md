@@ -19,7 +19,7 @@ Check the [Examples](https://github.com/Pubky/mainline/tree/main/examples).
 
 Running as a client, means you can store and query for values on the DHT, but not accept any incoming requests.
 
-```rust
+```no_run
 use mainline::Dht;
 
 let dht = Dht::client().unwrap();
@@ -37,7 +37,7 @@ This implementation also includes [measures against Vertical Sybil Attacks](./do
 
 Running as a server is the same as a client, but you also respond to incoming requests and serve as a routing and storing node, supporting the general routing of the DHT, and contributing to the storage capacity of the DHT.
 
-```rust
+```no_run
 use mainline::Dht;
 
 let dht = Dht::server().unwrap(); // or `Dht::builder::server_mode().build();` 

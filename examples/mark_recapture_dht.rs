@@ -48,7 +48,7 @@
 
 use dashmap::DashSet;
 use mainline::{Dht, Id};
-use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use tracing::{debug, info, Level};
 
 /// Adjust as needed. Default will take about ~2 hours
@@ -87,7 +87,8 @@ impl EstimateResult {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Initialize the logger.
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
@@ -109,7 +110,7 @@ fn main() {
 
     // Collect samples from the DHT.
     let (marked_sample, recapture_sample) =
-        collect_samples(&dht, pool, MIN_OVERLAP, MAX_RANDOM_NODE_IDS);
+        collect_samples(&dht, pool, MIN_OVERLAP, MAX_RANDOM_NODE_IDS).await;
 
     // Display the final statistics.
     if let Some(estimate) = compute_estimate(&marked_sample, &recapture_sample) {
@@ -119,9 +120,9 @@ fn main() {
     }
 }
 
-fn collect_samples(
+async fn collect_samples(
     dht: &Dht,
-    pool: ThreadPool,
+    _pool: ThreadPool,
     min_overlap: usize,
     max_unique_random_node_ids: usize,
 ) -> (DashSet<Id>, DashSet<Id>) {
@@ -141,22 +142,37 @@ fn collect_samples(
         let mark_random_ids: Vec<_> = (0..BATCH_SIZE).map(|_| Id::random()).collect();
         let recapture_random_ids: Vec<_> = (0..BATCH_SIZE).map(|_| Id::random()).collect();
 
-        // Perform sampling in the thread pool
-        pool.install(|| {
-            // Sample for marked_sample in parallel.
-            mark_random_ids.par_iter().for_each(|random_id| {
-                for node in dht.find_node(*random_id) {
+        // Sample for marked_sample concurrently.
+        let mut mark_tasks = Vec::new();
+        for random_id in &mark_random_ids {
+            let dht = dht.clone();
+            let random_id = *random_id;
+            let marked_sample = marked_sample.clone();
+            mark_tasks.push(tokio::spawn(async move {
+                for node in dht.find_node(random_id).await.iter() {
                     marked_sample.insert(*node.id());
                 }
-            });
+            }));
+        }
+        for task in mark_tasks {
+            let _ = task.await;
+        }
 
-            // Sample for recapture_sample in parallel.
-            recapture_random_ids.par_iter().for_each(|random_id| {
-                for node in dht.find_node(*random_id) {
+        // Sample for recapture_sample concurrently.
+        let mut recap_tasks = Vec::new();
+        for random_id in &recapture_random_ids {
+            let dht = dht.clone();
+            let random_id = *random_id;
+            let recapture_sample = recapture_sample.clone();
+            recap_tasks.push(tokio::spawn(async move {
+                for node in dht.find_node(random_id).await.iter() {
                     recapture_sample.insert(*node.id());
                 }
-            });
-        });
+            }));
+        }
+        for task in recap_tasks {
+            let _ = task.await;
+        }
 
         total_iterations += BATCH_SIZE;
 

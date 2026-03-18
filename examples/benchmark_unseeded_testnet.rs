@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let start = Instant::now();
-    mainline::Testnet::new_unseeded(100).unwrap();
+    mainline::Testnet::new_unseeded(100).await.unwrap();
     println!("{:?}", start.elapsed());
 }

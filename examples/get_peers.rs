@@ -14,7 +14,8 @@ struct Cli {
     infohash: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         // Switch to DEBUG to see incoming values and the IP of the responding nodes
         .with_max_level(Level::INFO)
@@ -28,20 +29,21 @@ fn main() {
 
     println!("Looking up peers for info_hash: {} ...", info_hash);
     println!("\n=== COLD QUERY ===");
-    get_peers(&dht, &info_hash);
+    get_peers(&dht, &info_hash).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
     println!("Looking up peers for info_hash: {} ...", info_hash);
-    get_peers(&dht, &info_hash);
+    get_peers(&dht, &info_hash).await;
 }
 
-fn get_peers(dht: &Dht, info_hash: &Id) {
+async fn get_peers(dht: &Dht, info_hash: &Id) {
     let start = Instant::now();
     let mut first = false;
 
     let mut count = 0;
 
-    for peer in dht.get_peers(*info_hash) {
+    let mut stream = dht.get_peers(*info_hash);
+    while let Some(peer) = stream.next().await {
         if !first {
             first = true;
             println!(

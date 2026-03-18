@@ -14,7 +14,8 @@ struct Cli {
     infohash: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     let cli = Cli::parse();
@@ -26,16 +27,17 @@ fn main() {
     println!("\nAnnouncing peer on an infohash: {} ...\n", cli.infohash);
 
     println!("\n=== COLD QUERY ===");
-    announce(&dht, info_hash);
+    announce(&dht, info_hash).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    announce(&dht, info_hash);
+    announce(&dht, info_hash).await;
 }
 
-fn announce(dht: &Dht, info_hash: Id) {
+async fn announce(dht: &Dht, info_hash: Id) {
     let start = Instant::now();
 
     dht.announce_peer(info_hash, Some(6991))
+        .await
         .expect("announce_peer failed");
 
     println!(

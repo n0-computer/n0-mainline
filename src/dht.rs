@@ -3,12 +3,12 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddrV4, ToSocketAddrs},
-    thread,
+    pin::Pin,
+    task::{Context, Poll},
     time::Duration,
 };
 
-use flume::{Receiver, Sender, TryRecvError};
-
+use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 use crate::{
@@ -28,7 +28,7 @@ use crate::rpc::config::Config;
 
 #[derive(Debug, Clone)]
 /// Mainline Dht node.
-pub struct Dht(pub(crate) Sender<ActorMessage>);
+pub struct Dht(mpsc::UnboundedSender<ActorMessage>);
 
 #[derive(Debug, Default, Clone)]
 /// A builder for the [Dht] node.
@@ -130,19 +130,11 @@ impl Dht {
     /// Could return an error if it failed to bind to the specified
     /// port or other io errors while binding the udp socket.
     pub fn new(config: Config) -> Result<Self, std::io::Error> {
-        let (sender, receiver) = flume::unbounded();
-
-        thread::Builder::new()
-            .name("Mainline Dht actor thread".to_string())
-            .spawn(move || run(config, receiver))?;
-
-        let (tx, rx) = flume::bounded(1);
-
-        sender
-            .send(ActorMessage::Check(tx))
-            .expect("actor thread unexpectedly shutdown");
-
-        rx.recv().expect("actor thread unexpectedly shutdown")?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let rpc = Rpc::new(config)?;
+        let address = rpc.local_addr();
+        info!(?address, "Mainline DHT listening");
+        tokio::spawn(run(rpc, receiver));
 
         Ok(Dht(sender))
     }
@@ -173,29 +165,29 @@ impl Dht {
     // === Getters ===
 
     /// Information and statistics about this [Dht] node.
-    pub fn info(&self) -> Info {
-        let (tx, rx) = flume::bounded::<Info>(1);
+    pub async fn info(&self) -> Info {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Info(tx));
 
-        rx.recv().expect("actor thread unexpectedly shutdown")
+        rx.await.expect("actor task unexpectedly shutdown")
     }
 
-    /// Turn this node's routing table to a list of bootstrapping nodes.   
-    pub fn to_bootstrap(&self) -> Vec<String> {
-        let (tx, rx) = flume::bounded::<Vec<String>>(1);
+    /// Turn this node's routing table to a list of bootstrapping nodes.
+    pub async fn to_bootstrap(&self) -> Vec<String> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::ToBootstrap(tx));
 
-        rx.recv().expect("actor thread unexpectedly shutdown")
+        rx.await.expect("actor task unexpectedly shutdown")
     }
 
     // === Public Methods ===
 
-    /// Block until the bootstrapping query is done.
+    /// Await until the bootstrapping query is done.
     ///
     /// Returns true if the bootstrapping was successful.
-    pub fn bootstrapped(&self) -> bool {
-        let info = self.info();
-        let nodes = self.find_node(*info.id());
+    pub async fn bootstrapped(&self) -> bool {
+        let info = self.info().await;
+        let nodes = self.find_node(*info.id()).await;
 
         !nodes.is_empty()
     }
@@ -215,14 +207,14 @@ impl Dht {
     /// If you are trying to find the closest nodes to a target with intent to [Self::put],
     /// a request directly to these nodes (using `extra_nodes` parameter), then you should
     /// use [Self::get_closest_nodes] instead.
-    pub fn find_node(&self, target: Id) -> Box<[Node]> {
-        let (tx, rx) = flume::bounded::<Box<[Node]>>(1);
+    pub async fn find_node(&self, target: Id) -> Box<[Node]> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv()
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -237,14 +229,14 @@ impl Dht {
     /// for Bittorrent is that any peer will introduce you to more peers through "peer exchange"
     /// so if you are implementing something different from Bittorrent, you might want
     /// to implement your own logic for gossipping more peers after you discover the first ones.
-    pub fn get_peers(&self, info_hash: Id) -> GetIterator<Vec<SocketAddrV4>> {
-        let (tx, rx) = flume::unbounded::<Vec<SocketAddrV4>>();
+    pub fn get_peers(&self, info_hash: Id) -> GetStream<Vec<SocketAddrV4>> {
+        let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::Peers(tx),
         ));
 
-        GetIterator(rx.into_iter())
+        GetStream(rx)
     }
 
     /// Announce a peer for a given infohash.
@@ -252,7 +244,11 @@ impl Dht {
     /// The peer will be announced on this process IP.
     /// If explicit port is passed, it will be used, otherwise the port will be implicitly
     /// assumed by remote nodes to be the same ase port they received the request from.
-    pub fn announce_peer(&self, info_hash: Id, port: Option<u16>) -> Result<Id, PutQueryError> {
+    pub async fn announce_peer(
+        &self,
+        info_hash: Id,
+        port: Option<u16>,
+    ) -> Result<Id, PutQueryError> {
         let (port, implied_port) = match port {
             Some(port) => (port, None),
             None => (0, Some(true)),
@@ -266,6 +262,7 @@ impl Dht {
             }),
             None,
         )
+        .await
         .map_err(|error| match error {
             PutError::Query(error) => error,
             PutError::Concurrency(_) => {
@@ -277,8 +274,8 @@ impl Dht {
     // === Immutable data ===
 
     /// Get an Immutable data by its sha1 hash.
-    pub fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
-        let (tx, rx) = flume::unbounded::<Box<[u8]>>();
+    pub async fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -288,11 +285,11 @@ impl Dht {
             ResponseSender::Immutable(tx),
         ));
 
-        rx.recv().map(Some).unwrap_or(None)
+        rx.recv().await
     }
 
     /// Put an immutable data to the DHT.
-    pub fn put_immutable(&self, value: &[u8]) -> Result<Id, PutQueryError> {
+    pub async fn put_immutable(&self, value: &[u8]) -> Result<Id, PutQueryError> {
         let target: Id = hash_immutable(value).into();
 
         self.put(
@@ -302,6 +299,7 @@ impl Dht {
             }),
             None,
         )
+        .await
         .map_err(|error| match error {
             PutError::Query(error) => error,
             PutError::Concurrency(_) => {
@@ -319,7 +317,7 @@ impl Dht {
     ///
     /// # Order
     ///
-    /// The order of [MutableItem]s returned by this iterator is not guaranteed to
+    /// The order of [MutableItem]s returned by this stream is not guaranteed to
     /// reflect their `seq` value. You should not assume that the later items are
     /// more recent than earlier ones.
     ///
@@ -329,10 +327,10 @@ impl Dht {
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
         more_recent_than: Option<i64>,
-    ) -> GetIterator<MutableItem> {
+    ) -> GetStream<MutableItem> {
         let salt = salt.map(|s| s.into());
         let target = MutableItem::target_from_key(public_key, salt.as_deref());
-        let (tx, rx) = flume::unbounded::<MutableItem>();
+        let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -342,18 +340,19 @@ impl Dht {
             ResponseSender::Mutable(tx),
         ));
 
-        GetIterator(rx.into_iter())
+        GetStream(rx)
     }
 
     /// Get the most recent [MutableItem] from the network.
-    pub fn get_mutable_most_recent(
+    pub async fn get_mutable_most_recent(
         &self,
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
     ) -> Option<MutableItem> {
         let mut most_recent: Option<MutableItem> = None;
-        let iter = self.get_mutable(public_key, salt, None);
-        for item in iter {
+        let mut stream = self.get_mutable(public_key, salt, None);
+
+        while let Some(item) = stream.next().await {
             if let Some(mr) = &most_recent {
                 if item.seq() == mr.seq && item.value() > &mr.value {
                     most_recent = Some(item)
@@ -377,54 +376,61 @@ impl Dht {
     /// To mitigate the risk of lost updates, you should call the [Self::get_mutable_most_recent] method
     /// then start authoring the new [MutableItem] based on the most recent as in the following example:
     ///
-    ///```rust
+    ///```ignore
     /// use mainline::{Dht, MutableItem, SigningKey, Testnet};
     /// use std::net::Ipv4Addr;
     ///
-    /// let testnet = Testnet::builder(3).build().unwrap();
-    /// let dht = Dht::builder()
-    ///     .bootstrap(&testnet.bootstrap)
-    ///     .bind_address(Ipv4Addr::LOCALHOST)
-    ///     .build()
-    ///     .unwrap();
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let testnet = Testnet::builder(3).build().await.unwrap();
+    ///     let dht = Dht::builder()
+    ///         .bootstrap(&testnet.bootstrap)
+    ///         .bind_address(Ipv4Addr::LOCALHOST)
+    ///         .build()
+    ///         .unwrap();
     ///
-    /// let signing_key = SigningKey::from_bytes(&[0; 32]);
-    /// let key = signing_key.verifying_key().to_bytes();
-    /// let salt = Some(b"salt".as_ref());
+    ///     let signing_key = SigningKey::from_bytes(&[0; 32]);
+    ///     let key = signing_key.verifying_key().to_bytes();
+    ///     let salt = Some(b"salt".as_ref());
     ///
-    /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt) {
-    ///     // 1. Optionally Create a new value to take the most recent's value in consideration.
-    ///     let mut new_value = most_recent.value().to_vec();
-    ///     new_value.extend_from_slice(b" more data");
+    ///     let (item, cas) = if let Some(most_recent) = dht.get_mutable_most_recent(&key, salt).await {
+    ///         // 1. Optionally Create a new value to take the most recent's value in consideration.
+    ///         let mut new_value = most_recent.value().to_vec();
+    ///         new_value.extend_from_slice(b" more data");
     ///
-    ///     // 2. Increment the sequence number to be higher than the most recent's.
-    ///     let most_recent_seq = most_recent.seq();
-    ///     let new_seq = most_recent_seq + 1;
+    ///         // 2. Increment the sequence number to be higher than the most recent's.
+    ///         let most_recent_seq = most_recent.seq();
+    ///         let new_seq = most_recent_seq + 1;
     ///
-    ///     (
-    ///         MutableItem::new(signing_key, &new_value, new_seq, salt),
-    ///         // 3. Use the most recent [MutableItem::seq] as a `CAS`.
-    ///         Some(most_recent_seq)
-    ///     )
-    /// } else {
-    ///     (MutableItem::new(signing_key, b"first value", 1, salt), None)
-    /// };
+    ///         (
+    ///             MutableItem::new(signing_key, &new_value, new_seq, salt),
+    ///             // 3. Use the most recent [MutableItem::seq] as a `CAS`.
+    ///             Some(most_recent_seq)
+    ///         )
+    ///     } else {
+    ///         (MutableItem::new(signing_key, b"first value", 1, salt), None)
+    ///     };
     ///
-    /// dht.put_mutable(item, cas).unwrap();
+    ///     dht.put_mutable(item, cas).await.unwrap();
+    /// }
     /// ```
     ///
     /// ## Errors
     ///
     /// In addition to the [PutQueryError] common with all PUT queries, PUT mutable item
-    /// query has other [Concurrency errors][ConcurrencyError], that try to detect write conflict
+    /// query has other [Concurrency errors][crate::rpc::ConcurrencyError], that try to detect write conflict
     /// risks or obvious conflicts.
     ///
     /// If you are lucky to get one of these errors (which is not guaranteed), then you should
     /// read the most recent item again, and repeat the steps in the previous example.
-    pub fn put_mutable(&self, item: MutableItem, cas: Option<i64>) -> Result<Id, PutMutableError> {
+    pub async fn put_mutable(
+        &self,
+        item: MutableItem,
+        cas: Option<i64>,
+    ) -> Result<Id, PutMutableError> {
         let request = PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, cas));
 
-        self.put(request, None).map_err(|error| match error {
+        self.put(request, None).await.map_err(|error| match error {
             PutError::Query(err) => PutMutableError::Query(err),
             PutError::Concurrency(err) => PutMutableError::Concurrency(err),
         })
@@ -436,8 +442,8 @@ impl Dht {
     ///
     /// Useful to [Self::put] a request to nodes further from the 20 closest nodes to the
     /// [PutRequestSpecific::target]. Which itself is useful to circumvent [extreme vertical sybil attacks](https://github.com/pubky/mainline/blob/main/docs/censorship-resistance.md#extreme-vertical-sybil-attacks).
-    pub fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
-        let (tx, rx) = flume::unbounded::<Box<[Node]>>();
+    pub async fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -447,7 +453,7 @@ impl Dht {
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv()
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -460,159 +466,169 @@ impl Dht {
     /// [Self::get_closest_nodes] with the target that you want to find the closest nodes to.
     ///
     /// Note: extra nodes need to have [Node::valid_token].
-    pub fn put(
+    pub async fn put(
         &self,
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
     ) -> Result<Id, PutError> {
-        self.put_inner(request, extra_nodes)
-            .recv()
+        let (tx, rx) = oneshot::channel();
+        self.send(ActorMessage::Put(request, tx, extra_nodes));
+
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
     // === Private Methods ===
 
-    pub(crate) fn put_inner(
-        &self,
-        request: PutRequestSpecific,
-        extra_nodes: Option<Box<[Node]>>,
-    ) -> flume::Receiver<Result<Id, PutError>> {
-        let (tx, rx) = flume::bounded::<Result<Id, PutError>>(1);
-        self.send(ActorMessage::Put(request, tx, extra_nodes));
-
-        rx
-    }
-
     pub(crate) fn send(&self, message: ActorMessage) {
         self.0
             .send(message)
-            .expect("actor thrread unexpectedly shutdown");
+            .expect("actor task unexpectedly shutdown");
     }
 }
 
-pub struct GetIterator<T>(flume::IntoIter<T>);
+/// A [futures_core::Stream] of incoming peers, immutable or mutable values.
+pub struct GetStream<T>(mpsc::UnboundedReceiver<T>);
 
-impl<T> Iterator for GetIterator<T> {
+impl<T> GetStream<T> {
+    /// Get the next item from the stream.
+    pub async fn next(&mut self) -> Option<T> {
+        self.0.recv().await
+    }
+}
+
+impl<T> futures_core::Stream for GetStream<T> {
     type Item = T;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.poll_recv(cx)
     }
 }
 
-fn run(config: Config, receiver: Receiver<ActorMessage>) {
-    match Rpc::new(config) {
-        Ok(mut rpc) => {
-            let address = rpc.local_addr();
-            info!(?address, "Mainline DHT listening");
+// === Actor ===
 
-            let mut put_senders = HashMap::new();
-            let mut get_senders = HashMap::new();
+/// Tick interval for the actor loop when no messages or socket data arrive.
+const TICK_INTERVAL: Duration = Duration::from_millis(1);
 
-            loop {
-                match receiver.try_recv() {
-                    Ok(actor_message) => match actor_message {
-                        ActorMessage::Check(sender) => {
-                            let _ = sender.send(Ok(()));
-                        }
-                        ActorMessage::Info(sender) => {
-                            let _ = sender.send(rpc.info());
-                        }
-                        ActorMessage::Put(request, sender, extra_nodes) => {
-                            let target = *request.target();
+async fn run(mut rpc: Rpc, mut receiver: mpsc::UnboundedReceiver<ActorMessage>) {
+    let mut put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>> = HashMap::new();
+    let mut get_senders: HashMap<Id, Vec<ResponseSender>> = HashMap::new();
+    let mut tick_interval = tokio::time::interval(TICK_INTERVAL);
 
-                            match rpc.put(request, extra_nodes) {
-                                Ok(()) => {
-                                    let senders = put_senders.entry(target).or_insert(vec![]);
+    loop {
+        // Wait for either a message or a tick interval
+        tokio::select! {
+            biased;
 
-                                    senders.push(sender);
-                                }
-                                Err(error) => {
-                                    let _ = sender.send(Err(error));
-                                }
-                            };
-                        }
-                        ActorMessage::Get(request, sender) => {
-                            let target = *request.target();
-
-                            if let Some(responses) = rpc.get(request, None) {
-                                for response in responses {
-                                    send(&sender, response);
-                                }
-                            };
-
-                            let senders = get_senders.entry(target).or_insert(vec![]);
-
-                            senders.push(sender);
-                        }
-                        ActorMessage::ToBootstrap(sender) => {
-                            let _ = sender.send(rpc.routing_table().to_bootstrap());
-                        }
-                        ActorMessage::SeedRouting(nodes, sender) => {
-                            for node in nodes {
-                                rpc.routing_table_mut().add(node);
-                            }
-                            let _ = sender.send(());
-                        }
-                    },
-                    Err(TryRecvError::Disconnected) => {
-                        // Node was dropped, kill this thread.
-                        tracing::debug!("mainline::Dht's actor thread was shutdown after Drop.");
+            msg = receiver.recv() => {
+                match msg {
+                    Some(msg) => handle_actor_message(&mut rpc, msg, &mut put_senders, &mut get_senders),
+                    None => {
+                        tracing::debug!("mainline::Dht actor task shutdown after Drop.");
                         break;
                     }
-                    Err(TryRecvError::Empty) => {
-                        // No op
-                    }
                 }
+            }
 
-                let report = rpc.tick();
+            _ = tick_interval.tick() => {
+                // Periodic tick for socket I/O and maintenance
+            }
+        }
 
-                // Response for an ongoing GET query
-                if let Some((target, response)) = report.new_query_response {
-                    if let Some(senders) = get_senders.get(&target) {
-                        for sender in senders {
-                            send(sender, response.clone());
-                        }
-                    }
+        // Drain any additional pending messages
+        loop {
+            match receiver.try_recv() {
+                Ok(msg) => {
+                    handle_actor_message(&mut rpc, msg, &mut put_senders, &mut get_senders)
                 }
+                Err(_) => break,
+            }
+        }
 
-                // Cleanup done GET queries
-                for (id, closest_nodes) in report.done_get_queries {
-                    if let Some(senders) = get_senders.remove(&id) {
-                        for sender in senders {
-                            // return closest_nodes to whoever was asking
-                            if let ResponseSender::ClosestNodes(sender) = sender {
-                                let _ = sender.send(closest_nodes.clone());
-                            }
-                        }
-                    }
+        // Tick the RPC engine
+        let report = rpc.tick();
+
+        // Response for an ongoing GET query
+        if let Some((target, response)) = report.new_query_response {
+            if let Some(senders) = get_senders.get(&target) {
+                for sender in senders {
+                    send_streaming(sender, response.clone());
                 }
+            }
+        }
 
-                // Cleanup done PUT query and send a resulting error if any.
-                for (id, error) in report.done_put_queries {
-                    if let Some(senders) = put_senders.remove(&id) {
-                        let result = if let Some(error) = error {
-                            Err(error)
-                        } else {
-                            Ok(id)
-                        };
-
-                        for sender in senders {
-                            let _ = sender.send(result.clone());
-                        }
+        // Cleanup done GET queries
+        for (id, closest_nodes) in report.done_get_queries {
+            if let Some(senders) = get_senders.remove(&id) {
+                for sender in senders {
+                    if let ResponseSender::ClosestNodes(sender) = sender {
+                        let _ = sender.send(closest_nodes.clone());
                     }
                 }
             }
         }
-        Err(err) => {
-            if let Ok(ActorMessage::Check(sender)) = receiver.try_recv() {
-                let _ = sender.send(Err(err));
+
+        // Cleanup done PUT queries and send results
+        for (id, error) in report.done_put_queries {
+            if let Some(senders) = put_senders.remove(&id) {
+                for sender in senders {
+                    let result = match &error {
+                        Some(err) => Err(err.clone()),
+                        None => Ok(id),
+                    };
+                    let _ = sender.send(result);
+                }
             }
         }
-    };
+    }
 }
 
-fn send(sender: &ResponseSender, response: Response) {
+fn handle_actor_message(
+    rpc: &mut Rpc,
+    msg: ActorMessage,
+    put_senders: &mut HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
+    get_senders: &mut HashMap<Id, Vec<ResponseSender>>,
+) {
+    match msg {
+        ActorMessage::Info(sender) => {
+            let _ = sender.send(rpc.info());
+        }
+        ActorMessage::Put(request, sender, extra_nodes) => {
+            let target = *request.target();
+
+            match rpc.put(request, extra_nodes) {
+                Ok(()) => {
+                    put_senders.entry(target).or_default().push(sender);
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                }
+            };
+        }
+        ActorMessage::Get(request, sender) => {
+            let target = *request.target();
+
+            if let Some(responses) = rpc.get(request, None) {
+                for response in responses {
+                    send_streaming(&sender, response);
+                }
+            };
+
+            get_senders.entry(target).or_default().push(sender);
+        }
+        ActorMessage::ToBootstrap(sender) => {
+            let _ = sender.send(rpc.routing_table().to_bootstrap());
+        }
+        ActorMessage::SeedRouting(nodes, sender) => {
+            for node in nodes {
+                rpc.routing_table_mut().add(node);
+            }
+            let _ = sender.send(());
+        }
+    }
+}
+
+fn send_streaming(sender: &ResponseSender, response: Response) {
     match (sender, response) {
         (ResponseSender::Peers(s), Response::Peers(r)) => {
             let _ = s.send(r);
@@ -629,24 +645,23 @@ fn send(sender: &ResponseSender, response: Response) {
 
 #[derive(Debug)]
 pub(crate) enum ActorMessage {
-    Info(Sender<Info>),
+    Info(oneshot::Sender<Info>),
     Put(
         PutRequestSpecific,
-        Sender<Result<Id, PutError>>,
+        oneshot::Sender<Result<Id, PutError>>,
         Option<Box<[Node]>>,
     ),
     Get(GetRequestSpecific, ResponseSender),
-    Check(Sender<Result<(), std::io::Error>>),
-    ToBootstrap(Sender<Vec<String>>),
-    SeedRouting(Vec<Node>, Sender<()>),
+    ToBootstrap(oneshot::Sender<Vec<String>>),
+    SeedRouting(Vec<Node>, oneshot::Sender<()>),
 }
 
-#[derive(Debug, Clone)]
-pub enum ResponseSender {
-    ClosestNodes(Sender<Box<[Node]>>),
-    Peers(Sender<Vec<SocketAddrV4>>),
-    Mutable(Sender<MutableItem>),
-    Immutable(Sender<Box<[u8]>>),
+#[derive(Debug)]
+pub(crate) enum ResponseSender {
+    ClosestNodes(oneshot::Sender<Box<[Node]>>),
+    Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
+    Mutable(mpsc::UnboundedSender<MutableItem>),
+    Immutable(mpsc::UnboundedSender<Box<[u8]>>),
 }
 
 /// Builder for creating a [Testnet] with custom configuration.
@@ -663,12 +678,13 @@ pub enum ResponseSender {
 /// use mainline::Testnet;
 ///
 /// // Use localhost (default)
-/// let testnet = Testnet::builder(3).build().unwrap();
+/// let testnet = Testnet::builder(3).build().await.unwrap();
 ///
 /// // Use all interfaces (0.0.0.0)
 /// let testnet = Testnet::builder(3)
 ///     .bind_address(Ipv4Addr::UNSPECIFIED)
 ///     .build()
+///     .await
 ///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
@@ -719,23 +735,16 @@ impl TestnetBuilder {
     /// Nodes will be bound to the configured `bind_address` (default: `127.0.0.1`).
     ///
     /// This will block until all nodes are created (and seeded if `seeded` is true).
-    pub fn build(&self) -> Result<Testnet, std::io::Error> {
+    pub async fn build(&self) -> Result<Testnet, std::io::Error> {
         if self.seeded {
-            Testnet::build_seeded(self.count, self.bind_address)
+            Testnet::build_seeded(self.count, self.bind_address).await
         } else {
-            Testnet::build_unseeded(self.count, self.bind_address)
+            Testnet::build_unseeded(self.count, self.bind_address).await
         }
     }
 }
 
 /// Create a testnet of Dht nodes to run tests against instead of the real mainline network.
-///
-/// # Bind Address
-///
-/// The convenience methods ([`Self::new`], [`Self::new_unseeded`], etc.) bind to `0.0.0.0`
-/// for backwards compatibility. Use [`Self::builder`] to bind to a different address.
-// TODO(breaking): In the next major version, change the default bind address from
-// `0.0.0.0` to `127.0.0.1` for better cross-platform compatibility (especially macOS).
 #[derive(Debug)]
 pub struct Testnet {
     /// bootstrapping nodes for this testnet.
@@ -743,10 +752,6 @@ pub struct Testnet {
     /// all nodes in this testnet
     pub nodes: Vec<Dht>,
 }
-
-// TODO(breaking): In the next major version, change `new()` and related methods to bind
-// to `127.0.0.1` instead of `0.0.0.0` for better macOS compatibility. The builder already
-// defaults to `127.0.0.1`.
 
 impl Testnet {
     /// Returns a builder to configure and create a [Testnet].
@@ -756,7 +761,7 @@ impl Testnet {
     /// # Example
     ///
     /// ```ignore
-    /// let testnet = Testnet::builder(3).build().unwrap();
+    /// let testnet = Testnet::builder(3).build().await.unwrap();
     /// ```
     pub fn builder(count: usize) -> TestnetBuilder {
         TestnetBuilder::new(count)
@@ -764,57 +769,22 @@ impl Testnet {
 
     /// Create a new testnet with a certain size.
     ///
-    /// Note: this network will be shutdown as soon as this struct
-    /// gets dropped, if you want the network to be `'static`, then
-    /// you should call [Self::leak].
-    ///
     /// This will block until all nodes are seeded with local peers.
-    /// If you are using an async runtime, consider using [Self::new_async].
-    ///
-    /// # Bind Address
-    ///
-    /// Nodes are bound to `0.0.0.0` (all interfaces). Use [`Self::builder`] to bind to
-    /// a different address.
-    pub fn new(count: usize) -> Result<Testnet, std::io::Error> {
-        Testnet::build_seeded(count, Ipv4Addr::UNSPECIFIED)
+    pub async fn new(count: usize) -> Result<Testnet, std::io::Error> {
+        Testnet::build_seeded(count, Ipv4Addr::UNSPECIFIED).await
     }
 
     /// Create a new testnet without pre-seeding routing tables.
     ///
     /// This is faster at startup, but nodes will not start with fully populated routing tables.
-    /// Use this when your tests do not require immediate full connectivity.
-    ///
-    /// # Bind Address
-    ///
-    /// Nodes are bound to `0.0.0.0` (all interfaces). Use [`Self::builder`] with `.seeded(false)`
-    /// to bind to a different address.
-    pub fn new_unseeded(count: usize) -> Result<Testnet, std::io::Error> {
-        Testnet::build_unseeded(count, Ipv4Addr::UNSPECIFIED)
+    pub async fn new_unseeded(count: usize) -> Result<Testnet, std::io::Error> {
+        Testnet::build_unseeded(count, Ipv4Addr::UNSPECIFIED).await
     }
 
-    #[cfg(feature = "async")]
-    /// Similar to [Self::new], but available for async contexts.
-    ///
-    /// # Bind Address
-    ///
-    /// Nodes are bound to `0.0.0.0` (all interfaces). Use [`Self::builder`] to bind to
-    /// a different address.
-    pub async fn new_async(count: usize) -> Result<Testnet, std::io::Error> {
-        Testnet::build_seeded(count, Ipv4Addr::UNSPECIFIED)
-    }
-
-    #[cfg(feature = "async")]
-    /// Similar to [Self::new_unseeded], but available for async contexts.
-    ///
-    /// # Bind Address
-    ///
-    /// Nodes are bound to `0.0.0.0` (all interfaces). Use [`Self::builder`] with `.seeded(false)`
-    /// to bind to a different address.
-    pub async fn new_unseeded_async(count: usize) -> Result<Testnet, std::io::Error> {
-        Testnet::build_unseeded(count, Ipv4Addr::UNSPECIFIED)
-    }
-
-    fn build_seeded(count: usize, bind_address: Ipv4Addr) -> Result<Testnet, std::io::Error> {
+    async fn build_seeded(
+        count: usize,
+        bind_address: Ipv4Addr,
+    ) -> Result<Testnet, std::io::Error> {
         let mut nodes = Vec::with_capacity(count);
 
         for _ in 0..count {
@@ -826,7 +796,11 @@ impl Testnet {
             nodes.push(node);
         }
 
-        let infos: Vec<_> = nodes.iter().map(|node| node.info()).collect();
+        let mut infos = Vec::with_capacity(count);
+        for node in &nodes {
+            infos.push(node.info().await);
+        }
+
         let bootstrap = infos
             .iter()
             .map(|info| info.local_addr().to_string())
@@ -842,15 +816,18 @@ impl Testnet {
                 .filter(|peer| peer.id() != info.id())
                 .cloned()
                 .collect::<Vec<_>>();
-            let (tx, rx) = flume::bounded(1);
+            let (tx, rx) = oneshot::channel();
             node.send(ActorMessage::SeedRouting(peers, tx));
-            let _ = rx.recv();
+            let _ = rx.await;
         }
 
         Ok(Self { bootstrap, nodes })
     }
 
-    fn build_unseeded(count: usize, bind_address: Ipv4Addr) -> Result<Testnet, std::io::Error> {
+    async fn build_unseeded(
+        count: usize,
+        bind_address: Ipv4Addr,
+    ) -> Result<Testnet, std::io::Error> {
         let mut nodes = Vec::with_capacity(count);
         let mut bootstrap = Vec::new();
 
@@ -862,7 +839,7 @@ impl Testnet {
                     .bind_address(bind_address)
                     .build()?;
 
-                let info = node.info();
+                let info = node.info().await;
 
                 bootstrap.push(info.local_addr().to_string());
 
@@ -893,16 +870,37 @@ impl Testnet {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug, Clone)]
 /// Put MutableItem errors.
 pub enum PutMutableError {
-    #[error(transparent)]
     /// Common PutQuery errors
-    Query(#[from] PutQueryError),
+    Query(PutQueryError),
 
-    #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
-    Concurrency(#[from] ConcurrencyError),
+    Concurrency(ConcurrencyError),
+}
+
+impl std::fmt::Display for PutMutableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PutMutableError::Query(e) => e.fmt(f),
+            PutMutableError::Concurrency(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PutMutableError {}
+
+impl From<PutQueryError> for PutMutableError {
+    fn from(e: PutQueryError) -> Self {
+        PutMutableError::Query(e)
+    }
+}
+
+impl From<ConcurrencyError> for PutMutableError {
+    fn from(e: ConcurrencyError) -> Self {
+        PutMutableError::Concurrency(e)
+    }
 }
 
 #[cfg(test)]
@@ -911,25 +909,24 @@ mod test {
     use std::str::FromStr;
 
     use ed25519_dalek::SigningKey;
-
     use crate::rpc::ConcurrencyError;
 
     use super::*;
 
-    #[test]
-    fn bind_twice() {
+    #[tokio::test]
+    async fn bind_twice() {
         let a = Dht::client().unwrap();
         let result = Dht::builder()
-            .port(a.info().local_addr().port())
+            .port(a.info().await.local_addr().port())
             .server_mode()
             .build();
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn announce_get_peer() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn announce_get_peer() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -945,16 +942,17 @@ mod test {
         let info_hash = Id::random();
 
         a.announce_peer(info_hash, Some(45555))
+            .await
             .expect("failed to announce");
 
-        let peers = b.get_peers(info_hash).next().expect("No peers");
+        let peers = b.get_peers(info_hash).next().await.expect("No peers");
 
         assert_eq!(peers.first().unwrap().port(), 45555);
     }
 
-    #[test]
-    fn put_get_immutable() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn put_get_immutable() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -970,31 +968,30 @@ mod test {
         let value = b"Hello World!";
         let expected_target = Id::from_str("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap();
 
-        let target = a.put_immutable(value).unwrap();
+        let target = a.put_immutable(value).await.unwrap();
         assert_eq!(target, expected_target);
 
-        let response = b.get_immutable(target).unwrap();
-
-        assert_eq!(response, value.to_vec().into_boxed_slice());
+        let response = b.get_immutable(target).await;
+        assert_eq!(response, Some(value.to_vec().into_boxed_slice()));
     }
 
-    #[test]
-    fn find_node_no_values() {
+    #[tokio::test]
+    async fn find_node_no_values() {
         let client = Dht::builder().no_bootstrap().build().unwrap();
 
-        client.find_node(Id::random());
+        client.find_node(Id::random()).await;
     }
 
-    #[test]
-    fn put_get_immutable_no_values() {
+    #[tokio::test]
+    async fn put_get_immutable_no_values() {
         let client = Dht::builder().no_bootstrap().build().unwrap();
 
-        assert_eq!(client.get_immutable(Id::random()), None);
+        assert_eq!(client.get_immutable(Id::random()).await, None);
     }
 
-    #[test]
-    fn put_get_mutable() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn put_get_mutable() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -1017,19 +1014,20 @@ mod test {
 
         let item = MutableItem::new(signer.clone(), value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         assert_eq!(&response, &item);
     }
 
-    #[test]
-    fn put_get_mutable_no_more_recent_value() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn put_get_mutable_no_more_recent_value() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -1052,18 +1050,19 @@ mod test {
 
         let item = MutableItem::new(signer.clone(), value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
-            .next();
+            .next()
+            .await;
 
         assert!(&response.is_none());
     }
 
-    #[test]
-    fn repeated_put_query() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn repeated_put_query() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -1071,14 +1070,15 @@ mod test {
             .build()
             .unwrap();
 
-        let id = a.put_immutable(&[1, 2, 3]).unwrap();
+        let first = a.put_immutable(&[1, 2, 3]).await;
+        let second = a.put_immutable(&[1, 2, 3]).await;
 
-        assert_eq!(a.put_immutable(&[1, 2, 3]).unwrap(), id);
+        assert_eq!(first.unwrap(), second.unwrap());
     }
 
-    #[test]
-    fn concurrent_get_mutable() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn concurrent_get_mutable() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
@@ -1096,32 +1096,33 @@ mod test {
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
 
-        let key = signer.verifying_key().to_bytes();
         let seq = 1000;
         let value = b"Hello World!";
 
         let item = MutableItem::new(signer.clone(), value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let _response_first = b
-            .get_mutable(&key, None, None)
+            .get_mutable(signer.verifying_key().as_bytes(), None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         let response_second = b
-            .get_mutable(&key, None, None)
+            .get_mutable(signer.verifying_key().as_bytes(), None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         assert_eq!(&response_second, &item);
     }
 
-    #[test]
-    fn concurrent_put_mutable_same() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn concurrent_put_mutable_same() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
-        let client = Dht::builder()
+        let dht = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .bind_address(Ipv4Addr::LOCALHOST)
             .build()
@@ -1140,24 +1141,26 @@ mod test {
         let mut handles = vec![];
 
         for _ in 0..2 {
-            let client = client.clone();
+            let dht = dht.clone();
             let item = item.clone();
 
-            let handle = std::thread::spawn(move || client.put_mutable(item, None).unwrap());
+            let handle = tokio::spawn(async move {
+                dht.put_mutable(item, None).await.unwrap();
+            });
 
             handles.push(handle);
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
     }
 
-    #[test]
-    fn concurrent_put_mutable_different() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn concurrent_put_mutable_different() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
-        let client = Dht::builder()
+        let dht = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .bind_address(Ipv4Addr::LOCALHOST)
             .build()
@@ -1165,12 +1168,12 @@ mod test {
 
         let mut handles = vec![];
 
-        for i in 0..2 {
-            let client = client.clone();
+        for i in 0..2u8 {
+            let dht = dht.clone();
 
             let signer = SigningKey::from_bytes(&[
-                56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
-                228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
+                56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115,
+                7, 228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
             ]);
 
             let seq = 1000;
@@ -1180,8 +1183,8 @@ mod test {
 
             let item = MutableItem::new(signer.clone(), &value, seq, None);
 
-            let handle = std::thread::spawn(move || {
-                let result = client.put_mutable(item, None);
+            let handle = tokio::spawn(async move {
+                let result = dht.put_mutable(item, None).await;
                 if i == 0 {
                     assert!(result.is_ok())
                 } else {
@@ -1196,15 +1199,15 @@ mod test {
         }
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
     }
 
-    #[test]
-    fn concurrent_put_mutable_different_with_cas() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn concurrent_put_mutable_different_with_cas() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
-        let client = Dht::builder()
+        let dht = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .bind_address(Ipv4Addr::LOCALHOST)
             .build()
@@ -1214,41 +1217,38 @@ mod test {
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
+        let value = b"Hello World!".to_vec();
 
-        // First
+        // First - fire and forget a put
         {
-            let item = MutableItem::new(signer.clone(), &[], 1000, None);
-
-            let (sender, _) = flume::bounded::<Result<Id, PutError>>(1);
+            let item = MutableItem::new(signer.clone(), &value, 1000, None);
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
-            client
-                .0
-                .send(ActorMessage::Put(request, sender, None))
-                .unwrap();
+            let (tx, _rx) = oneshot::channel();
+            dht.send(ActorMessage::Put(request, tx, None));
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Second
+        // Second - read most recent then put
         {
-            let item = MutableItem::new(signer, &[], 1001, None);
+            let item = MutableItem::new(signer, &value, 1001, None);
 
-            let most_recent = client.get_mutable_most_recent(item.key(), None);
+            let most_recent = dht.get_mutable_most_recent(item.key(), None).await;
 
             if let Some(cas) = most_recent.map(|item| item.seq()) {
-                client.put_mutable(item, Some(cas)).unwrap();
+                dht.put_mutable(item, Some(cas)).await.unwrap();
             } else {
-                client.put_mutable(item, None).unwrap();
+                dht.put_mutable(item, None).await.unwrap();
             }
         }
     }
 
-    #[test]
-    fn conflict_302_seq_less_than_current() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn conflict_302_seq_less_than_current() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
-        let client = Dht::builder()
+        let dht = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .bind_address(Ipv4Addr::LOCALHOST)
             .build()
@@ -1259,23 +1259,24 @@ mod test {
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
 
-        client
-            .put_mutable(MutableItem::new(signer.clone(), &[], 1001, None), None)
+        dht.put_mutable(MutableItem::new(signer.clone(), &[], 1001, None), None)
+            .await
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(signer, &[], 1000, None), None),
+            dht.put_mutable(MutableItem::new(signer, &[], 1000, None), None)
+                .await,
             Err(PutMutableError::Concurrency(
                 ConcurrencyError::NotMostRecent
             ))
         ));
     }
 
-    #[test]
-    fn conflict_301_cas() {
-        let testnet = Testnet::builder(10).build().unwrap();
+    #[tokio::test]
+    async fn conflict_301_cas() {
+        let testnet = Testnet::builder(10).build().await.unwrap();
 
-        let client = Dht::builder()
+        let dht = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .bind_address(Ipv4Addr::LOCALHOST)
             .build()
@@ -1286,25 +1287,25 @@ mod test {
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
 
-        client
-            .put_mutable(MutableItem::new(signer.clone(), &[], 1001, None), None)
+        dht.put_mutable(MutableItem::new(signer.clone(), &[], 1001, None), None)
+            .await
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(signer, &[], 1002, None), Some(1000)),
+            dht.put_mutable(MutableItem::new(signer, &[], 1002, None), Some(1000))
+                .await,
             Err(PutMutableError::Concurrency(ConcurrencyError::CasFailed))
         ));
     }
 
-    #[test]
-    fn populate_bootstrapping_node_routing_table() {
+    #[tokio::test]
+    async fn populate_bootstrapping_node_routing_table() {
         let size = 3;
 
-        let testnet = Testnet::builder(size).build().unwrap();
+        let testnet = Testnet::builder(size).build().await.unwrap();
 
-        assert!(testnet
-            .nodes
-            .iter()
-            .all(|n| n.to_bootstrap().len() == size - 1));
+        for node in &testnet.nodes {
+            assert_eq!(node.to_bootstrap().await.len(), size - 1);
+        }
     }
 }

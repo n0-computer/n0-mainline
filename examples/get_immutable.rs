@@ -14,7 +14,8 @@ struct Cli {
     target: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
     let cli = Cli::parse();
@@ -26,19 +27,20 @@ fn main() {
     println!("\nLooking up immutable data: {} ...\n", cli.target);
 
     println!("\n=== COLD QUERY ===");
-    get_immutable(&dht, info_hash);
+    get_immutable(&dht, info_hash).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    get_immutable(&dht, info_hash);
+    get_immutable(&dht, info_hash).await;
 }
 
-fn get_immutable(dht: &Dht, info_hash: Id) {
+async fn get_immutable(dht: &Dht, info_hash: Id) {
     let start = Instant::now();
 
     // No need to stream responses, just print the first result, since
     // all immutable data items are guaranteed to be the same.
     let value = dht
         .get_immutable(info_hash)
+        .await
         .expect("Failed to find the immutable value for the provided info_hash");
 
     let string = String::from_utf8(value.to_vec())
