@@ -1,10 +1,13 @@
 //! UDP socket layer managing incoming/outgoing requests and responses.
+//!
+//! Uses [`noq_udp`] for all socket I/O — `sendmsg`/`recvmsg` with optimal
+//! platform-specific configuration (ECN, buffer sizes, MTU discovery).
 
 mod inflight_requests;
 use crate::common::{ErrorSpecific, Message, MessageType, RequestSpecific, ResponseSpecific};
 use inflight_requests::InflightRequests;
-use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::io::{ErrorKind, IoSliceMut};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
@@ -20,11 +23,66 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(2000); // 2 
 /// Cleanup interval for expired inflight requests to avoid overhead on every recv
 const INFLIGHT_CLEANUP_INTERVAL: Duration = Duration::from_millis(200);
 
+/// A non-blocking IPv4 UDP socket backed by [`noq_udp`].
+///
+/// Wraps a `std::net::UdpSocket` with `noq_udp::UdpSocketState` so that
+/// every send uses `sendmsg` and every receive uses `recvmsg`, picking up
+/// platform optimisations (GRO, GSO, ECN, larger buffers) automatically.
+///
+/// All public methods are non-blocking — callers are expected to poll from
+/// an async task (the DHT actor loop).
+#[derive(Debug)]
+struct UdpIo {
+    socket: std::net::UdpSocket,
+    state: noq_udp::UdpSocketState,
+}
+
+impl UdpIo {
+    /// Bind to `addr` and configure the socket via noq-udp.
+    fn bind(addr: SocketAddr) -> std::io::Result<Self> {
+        let socket = std::net::UdpSocket::bind(addr)?;
+        // UdpSocketState::new sets non-blocking and configures ECN / buffers / etc.
+        let state = noq_udp::UdpSocketState::new(noq_udp::UdpSockRef::from(&socket))?;
+        Ok(Self { socket, state })
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Non-blocking send via `sendmsg`.
+    fn send_to(&self, buf: &[u8], dest: SocketAddr) -> std::io::Result<()> {
+        let transmit = noq_udp::Transmit {
+            destination: dest,
+            ecn: None,
+            contents: buf,
+            segment_size: None,
+            src_ip: None,
+        };
+        self.state
+            .send(noq_udp::UdpSockRef::from(&self.socket), &transmit)
+    }
+
+    /// Non-blocking receive via `recvmsg`. Returns `(len, source_addr)` or
+    /// `WouldBlock` when nothing is ready.
+    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        let mut iov = [IoSliceMut::new(buf)];
+        let mut meta = [noq_udp::RecvMeta::default()];
+        let n = self
+            .state
+            .recv(noq_udp::UdpSockRef::from(&self.socket), &mut iov, &mut meta)?;
+        if n == 0 {
+            return Err(std::io::Error::new(ErrorKind::WouldBlock, "no data"));
+        }
+        Ok((meta[0].len, meta[0].addr))
+    }
+}
+
 /// A UdpSocket wrapper that formats and correlates DHT requests and responses.
 #[derive(Debug)]
 pub struct KrpcSocket {
     next_tid: u32,
-    socket: UdpSocket,
+    io: UdpIo,
     pub(crate) server_mode: bool,
     inflight_requests: InflightRequests,
     last_cleanup: Instant,
@@ -37,28 +95,22 @@ impl KrpcSocket {
         let port = config.port;
         let bind_addr = config.bind_address.unwrap_or(Ipv4Addr::UNSPECIFIED);
 
-        let socket = if let Some(port) = port {
-            UdpSocket::bind(SocketAddr::from((bind_addr, port)))?
+        let io = if let Some(port) = port {
+            UdpIo::bind(SocketAddr::from((bind_addr, port)))?
         } else {
-            match UdpSocket::bind(SocketAddr::from((bind_addr, DEFAULT_PORT))) {
-                Ok(socket) => Ok(socket),
-                Err(_) => UdpSocket::bind(SocketAddr::from((bind_addr, 0))),
+            match UdpIo::bind(SocketAddr::from((bind_addr, DEFAULT_PORT))) {
+                Ok(io) => Ok(io),
+                Err(_) => UdpIo::bind(SocketAddr::from((bind_addr, 0))),
             }?
         };
 
-        let local_addr = match socket.local_addr()? {
+        let local_addr = match io.local_addr()? {
             SocketAddr::V4(addr) => addr,
             SocketAddr::V6(_) => unimplemented!("KrpcSocket does not support Ipv6"),
         };
 
-        socket.set_nonblocking(true)?;
-
-        // Use noq-udp for optimal socket configuration (ECN, buffer sizes, etc.)
-        let _state =
-            noq_udp::UdpSocketState::new(noq_udp::UdpSockRef::from(&socket)).ok();
-
         Ok(Self {
-            socket,
+            io,
             next_tid: 0,
             server_mode: config.server_mode,
             inflight_requests: InflightRequests::new(request_timeout),
@@ -146,7 +198,7 @@ impl KrpcSocket {
             self.inflight_requests.cleanup();
         }
 
-        match self.socket.recv_from(&mut buf) {
+        match self.io.recv_from(&mut buf) {
             Ok((amt, SocketAddr::V4(from))) => {
                 let bytes = &buf[..amt];
 
@@ -272,10 +324,10 @@ impl KrpcSocket {
         }
     }
 
-    /// Send a raw dht message (non-blocking)
+    /// Send a raw dht message (non-blocking via noq-udp sendmsg)
     fn send(&mut self, address: SocketAddrV4, message: Message) -> Result<(), SendMessageError> {
         let bytes = message.to_bytes()?;
-        self.socket.send_to(&bytes, SocketAddr::from(address))?;
+        self.io.send_to(&bytes, SocketAddr::from(address))?;
         trace!(context = "socket_message_sending", message = ?message);
         Ok(())
     }

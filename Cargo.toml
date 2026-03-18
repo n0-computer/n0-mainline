@@ -34,7 +34,7 @@ lru = { version = "0.16.2", default-features = false }
 dyn-clone = "1.0.20"
 
 # Async runtime and channels
-tokio = { version = "1", features = ["sync", "net", "time", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 futures-core = "0.3"
 
 # iroh ecosystem
