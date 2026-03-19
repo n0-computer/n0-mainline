@@ -9,7 +9,7 @@ async fn main() {
         .with_max_level(Level::DEBUG)
         .init();
 
-    let client = Dht::client().unwrap();
+    let client = Dht::client().await.unwrap();
 
     client.bootstrapped().await;
 

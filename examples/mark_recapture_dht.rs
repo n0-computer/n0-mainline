@@ -106,7 +106,7 @@ async fn main() {
         .expect("Failed to build Rayon thread pool");
 
     // Initialize the DHT client.
-    let dht = Dht::client().expect("Failed to create DHT client");
+    let dht = Dht::client().await.expect("Failed to create DHT client");
 
     // Collect samples from the DHT.
     let (marked_sample, recapture_sample) =

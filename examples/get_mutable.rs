@@ -26,7 +26,7 @@ async fn main() {
     let cli = Cli::parse();
 
     let public_key = from_hex(cli.public_key.clone()).to_bytes();
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("Looking up mutable item: {} ...", cli.public_key);
 

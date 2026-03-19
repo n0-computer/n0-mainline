@@ -107,14 +107,14 @@ impl Rpc {
     ///
     /// Returns an instance ready to accept `get`/`put` requests and handle incoming
     /// messages via [`Rpc::handle_message`] if you integrate it with your socket loop.
-    pub fn new(config: config::Config) -> Result<Self, std::io::Error> {
+    pub async fn new(config: config::Config) -> Result<Self, std::io::Error> {
         let id = if let Some(ip) = config.public_ip {
             Id::from_ip(ip.into())
         } else {
             Id::random()
         };
 
-        let socket = KrpcSocket::new(&config)?;
+        let socket = KrpcSocket::new(&config).await?;
 
         Ok(Rpc {
             bootstrap: config
@@ -236,7 +236,7 @@ impl Rpc {
 
         self.periodic_node_maintenance();
 
-        let new_query_response = self.handle_message();
+        self.socket.cleanup_inflight();
 
         if finished_self_findnode {
             self.log_bootstrap(self.id());
@@ -245,7 +245,6 @@ impl Rpc {
         RpcTickReport {
             done_get_queries,
             done_put_queries,
-            new_query_response,
         }
     }
 
@@ -1049,17 +1048,30 @@ impl Rpc {
         }
     }
 
-    /// Handle one incoming message, either a request or a response message. One message per tick.
-    fn handle_message(&mut self) -> Option<(Id, Response)> {
-        self.socket
-            .recv_from()
-            .and_then(|(message, from)| match message.message_type {
-                MessageType::Request(request_specific) => {
-                    self.handle_request(from, message.transaction_id, request_specific);
-                    None
-                }
-                _ => self.handle_response(from, message),
-            })
+    /// Process a single already-received message. Called by the actor loop
+    /// after receiving a datagram from the socket.
+    pub(crate) fn process_message(
+        &mut self,
+        message: Message,
+        from: SocketAddrV4,
+    ) -> Option<(Id, Response)> {
+        match message.message_type {
+            MessageType::Request(request_specific) => {
+                self.handle_request(from, message.transaction_id, request_specific);
+                None
+            }
+            _ => self.handle_response(from, message),
+        }
+    }
+
+    /// Flush queued outgoing packets.
+    pub(crate) async fn flush(&mut self) {
+        self.socket.flush().await;
+    }
+
+    /// Async receive: wait for an incoming KRPC message.
+    pub(crate) async fn recv(&mut self) -> Option<(Message, SocketAddrV4)> {
+        self.socket.recv_from_async().await
     }
 
     /// Check if routing table is empty and log an error if so.
@@ -1094,8 +1106,6 @@ pub struct RpcTickReport {
     /// All the [Id]s of the done [Rpc::put] queries,
     /// and optional [PutError] if the query failed.
     pub done_put_queries: Vec<(Id, Option<PutError>)>,
-    /// Received GET query response.
-    pub new_query_response: Option<(Id, Response)>,
 }
 
 #[derive(Debug, Clone)]

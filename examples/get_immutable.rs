@@ -22,7 +22,7 @@ async fn main() {
 
     let info_hash = Id::from_str(cli.target.as_str()).expect("Invalid info_hash");
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("\nLooking up immutable data: {} ...\n", cli.target);
 

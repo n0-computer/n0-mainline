@@ -5,7 +5,7 @@ use tracing::Level;
 async fn main() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("Calculating Dht size by sampling random lookup queries..",);
 

@@ -22,7 +22,7 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     let signer = from_hex(cli.secret_key);
 

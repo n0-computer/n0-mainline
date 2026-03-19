@@ -138,7 +138,7 @@ fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
 }
 
 async fn get_random_boostrap_nodes2() -> Vec<String> {
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
     let nodes = dht.find_node(Id::random()).await;
     let addrs = nodes
         .iter()
@@ -151,8 +151,8 @@ async fn get_random_boostrap_nodes2() -> Vec<String> {
 async fn init_dht(use_random_boostrap_nodes: bool) -> Dht {
     if use_random_boostrap_nodes {
         let bootstrap = get_random_boostrap_nodes2().await;
-        return Dht::builder().bootstrap(&bootstrap).build().unwrap();
+        return Dht::builder().bootstrap(&bootstrap).build().await.unwrap();
     } else {
-        Dht::client().unwrap()
+        Dht::client().await.unwrap()
     }
 }

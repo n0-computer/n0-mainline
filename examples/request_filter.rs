@@ -24,7 +24,7 @@ async fn main() {
             filter: Box::new(Filter),
             ..Default::default()
         })
-        .build()
+        .build().await
         .unwrap();
 
     client.bootstrapped().await;

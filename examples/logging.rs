@@ -528,7 +528,7 @@ async fn main() {
     // Configure and start the DHT node in server mode
     let dht = Dht::builder()
         .server_mode()
-        .build()
+        .build().await
         .expect("Failed to create DHT server");
 
     DhtLogger::info("DHT server node is running! Press Ctrl+C to stop.");

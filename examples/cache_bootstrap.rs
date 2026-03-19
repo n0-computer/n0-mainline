@@ -41,7 +41,7 @@ async fn main() {
         builder.extra_bootstrap(&cached_nodes);
     };
 
-    let client = builder.build().unwrap();
+    let client = builder.build().await.unwrap();
 
     client.bootstrapped().await;
 

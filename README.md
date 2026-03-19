@@ -22,7 +22,10 @@ Running as a client, means you can store and query for values on the DHT, but no
 ```no_run
 use mainline::Dht;
 
-let dht = Dht::client().unwrap();
+#[tokio::main]
+async fn main() {
+    let dht = Dht::client().await.unwrap();
+}
 ```
 
 Supported BEPs:
@@ -40,7 +43,10 @@ Running as a server is the same as a client, but you also respond to incoming re
 ```no_run
 use mainline::Dht;
 
-let dht = Dht::server().unwrap(); // or `Dht::builder::server_mode().build();` 
+#[tokio::main]
+async fn main() {
+    let dht = Dht::server().await.unwrap();
+}
 ```
 
 Supported BEPs:
