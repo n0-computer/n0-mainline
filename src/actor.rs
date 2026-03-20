@@ -195,6 +195,18 @@ impl Actor {
     }
 
     /// Send a message to closer and closer nodes until we can't find any more nodes.
+    ///
+    /// Queries take few seconds to fully traverse the network, once it is done, it will be removed from
+    /// self.iterative_queries. But until then, calling [Actor::get] multiple times, will just return the list
+    /// of responses seen so far.
+    ///
+    /// Effectively, we are caching responses and backing off the network for the duration it takes
+    /// to traverse it.
+    ///
+    /// - `request` [RequestTypeSpecific], except [RequestTypeSpecific::Ping] and
+    ///   [RequestTypeSpecific::Put] which will be ignored.
+    /// - `extra_nodes` option allows the query to visit specific nodes, that won't necessesarily be visited
+    ///   through the query otherwise.
     fn get(
         &mut self,
         request: GetRequestSpecific,

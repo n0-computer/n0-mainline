@@ -143,6 +143,13 @@ impl Dht {
 
     /// Create a new DHT node that is running in [Server mode][DhtBuilder::server_mode] as
     /// soon as possible.
+    ///
+    /// You shouldn't use this option unless you are sure your
+    /// DHT node is publicly accessible (not firewalled) _AND_ will be long running,
+    /// and/or you are running your own local network for testing.
+    ///
+    /// If you are not sure, use [Self::client] and it will switch
+    /// to server mode when/if these two conditions are met.
     pub async fn server() -> io::Result<Self> {
         Dht::builder().server_mode().build().await
     }
@@ -438,13 +445,17 @@ impl Dht {
     /// let salt = Some(b"salt".as_ref());
     ///
     /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt).await {
+    ///     // 1. Optionally Create a new value to take the most recent's value in consideration.
     ///     let mut new_value = most_recent.value().to_vec();
     ///     new_value.extend_from_slice(b" more data");
+    ///
+    ///     // 2. Increment the sequence number to be higher than the most recent's.
     ///     let most_recent_seq = most_recent.seq();
     ///     let new_seq = most_recent_seq + 1;
     ///
     ///     (
     ///         MutableItem::new(&signing_key, &new_value, new_seq, salt),
+    ///         // 3. Use the most recent [MutableItem::seq] as a `CAS`.
     ///         Some(most_recent_seq)
     ///     )
     /// } else {
