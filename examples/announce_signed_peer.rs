@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Instant};
 
-use dht::{Dht, Id, SigningKey};
+use dht::{Dht, Id, SecretKey};
 
 use clap::Parser;
 
@@ -36,7 +36,7 @@ async fn main() {
 
     println!(
         "\nAnnouncing signed peer {} on an infohash: {} ...\n",
-        to_hex(signer.verifying_key().as_bytes()),
+        to_hex(signer.public().as_bytes()),
         cli.infohash,
     );
 
@@ -47,7 +47,7 @@ async fn main() {
     announce(&dht, info_hash, &signer).await;
 }
 
-async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
+async fn announce(dht: &Dht, info_hash: Id, signer: &SecretKey) {
     let start = Instant::now();
 
     dht.announce_signed_peer(info_hash, signer)
@@ -60,7 +60,7 @@ async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
     );
 }
 
-fn from_hex(s: String) -> SigningKey {
+fn from_hex(s: String) -> SecretKey {
     if s.len() % 2 != 0 {
         panic!("Number of Hex characters should be even");
     }
@@ -73,7 +73,7 @@ fn from_hex(s: String) -> SigningKey {
         bytes.push(byte);
     }
 
-    SigningKey::try_from(bytes.as_slice()).expect("Invalid signing key")
+    SecretKey::try_from(bytes.as_slice()).expect("Invalid signing key")
 }
 
 fn to_hex(bytes: &[u8]) -> String {

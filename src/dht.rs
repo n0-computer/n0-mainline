@@ -7,7 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use ed25519_dalek::SigningKey;
+use iroh_base::SecretKey;
 use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
@@ -277,7 +277,7 @@ impl Dht {
     pub async fn announce_signed_peer(
         &self,
         info_hash: Id,
-        signer: &SigningKey,
+        signer: &SecretKey,
     ) -> Result<Id, PutQueryError> {
         let signed_announce = SignedAnnounce::new(signer, &info_hash);
 
@@ -435,13 +435,13 @@ impl Dht {
     /// then start authoring the new [MutableItem] based on the most recent as in the following example:
     ///
     ///```rust,ignore
-    /// use dht::{Dht, MutableItem, SigningKey, Testnet};
+    /// use dht::{Dht, MutableItem, SecretKey, Testnet};
     ///
     /// let testnet = Testnet::new(3).await.unwrap();
     /// let dht = Dht::builder().bootstrap(&testnet.bootstrap).build().await.unwrap();
     ///
-    /// let signing_key = SigningKey::from_bytes(&[0; 32]);
-    /// let key = signing_key.verifying_key().to_bytes();
+    /// let secret_key = SecretKey::from_bytes(&[0; 32]);
+    /// let key = secret_key.public().to_bytes();
     /// let salt = Some(b"salt".as_ref());
     ///
     /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt).await {
@@ -454,12 +454,12 @@ impl Dht {
     ///     let new_seq = most_recent_seq + 1;
     ///
     ///     (
-    ///         MutableItem::new(&signing_key, &new_value, new_seq, salt),
+    ///         MutableItem::new(&secret_key, &new_value, new_seq, salt),
     ///         // 3. Use the most recent [MutableItem::seq] as a `CAS`.
     ///         Some(most_recent_seq)
     ///     )
     /// } else {
-    ///     (MutableItem::new(&signing_key, b"first value", 1, salt), None)
+    ///     (MutableItem::new(&secret_key, b"first value", 1, salt), None)
     /// };
     ///
     /// dht.put_mutable(item, cas).await.unwrap();
@@ -561,7 +561,7 @@ pub enum PutMutableError {
 mod test {
     use std::{str::FromStr, time::Duration};
 
-    use ed25519_dalek::SigningKey;
+    use iroh_base::SecretKey;
     use futures::StreamExt;
 
     use crate::core::ConcurrencyError;
@@ -661,7 +661,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -674,7 +674,7 @@ mod test {
         a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
-            .get_mutable(signer.verifying_key().as_bytes(), None, None)
+            .get_mutable(signer.public().as_bytes(), None, None)
             .next()
             .await
             .expect("No mutable values");
@@ -697,7 +697,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -710,7 +710,7 @@ mod test {
         a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
-            .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
+            .get_mutable(signer.public().as_bytes(), None, Some(seq))
             .next()
             .await;
 
@@ -747,12 +747,12 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
 
-        let key = signer.verifying_key().to_bytes();
+        let key = *signer.public().as_bytes();
         let seq = 1000;
         let value = b"Hello World!";
 
@@ -785,7 +785,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -829,7 +829,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -857,7 +857,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SigningKey::from_bytes(&[
+        let signer = SecretKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -919,13 +919,13 @@ mod test {
             .map(|_| {
                 let mut secret_key = [0; 32];
                 getrandom::fill(&mut secret_key).unwrap();
-                SigningKey::from_bytes(&secret_key)
+                SecretKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();
 
         let mut expected_keys = signers
             .iter()
-            .map(|s| s.verifying_key().as_bytes().to_vec())
+            .map(|s| s.public().as_bytes().to_vec())
             .collect::<Vec<_>>();
         expected_keys.sort();
 
@@ -952,13 +952,13 @@ mod test {
             .map(|_| {
                 let mut secret_key = [0; 32];
                 getrandom::fill(&mut secret_key).unwrap();
-                SigningKey::from_bytes(&secret_key)
+                SecretKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();
 
         let mut expected_keys = signers
             .iter()
-            .map(|s| s.verifying_key().as_bytes().to_vec())
+            .map(|s| s.public().as_bytes().to_vec())
             .collect::<Vec<_>>();
         expected_keys.sort();
 

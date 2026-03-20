@@ -26,7 +26,7 @@ pub use common::{
 pub use core::server::{RequestFilter, ServerSettings, MAX_INFO_HASHES, MAX_PEERS, MAX_VALUES};
 pub use dht::{Dht, DhtBuilder, GetStream, Testnet};
 
-pub use ed25519_dalek::SigningKey;
+pub use iroh_base::SecretKey;
 
 pub mod errors {
     //! Exported errors

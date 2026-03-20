@@ -1,6 +1,6 @@
 use std::{convert::TryFrom, time::Instant};
 
-use dht::{Dht, MutableItem, SigningKey};
+use dht::{Dht, MutableItem, SecretKey};
 
 use clap::Parser;
 
@@ -31,7 +31,7 @@ async fn main() {
     println!(
         "\nStoring mutable data: \"{}\" for public_key: {}  ...",
         cli.value,
-        to_hex(signer.verifying_key().as_bytes())
+        to_hex(signer.public().as_bytes())
     );
 
     println!("\n=== COLD QUERY ===");
@@ -41,11 +41,11 @@ async fn main() {
     put(&dht, &signer, cli.value.as_bytes(), None).await;
 }
 
-async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
+async fn put(dht: &Dht, signer: &SecretKey, value: &[u8], salt: Option<&[u8]>) {
     let start = Instant::now();
 
     let (item, cas) = if let Some(most_recent) =
-        dht.get_mutable_most_recent(signer.verifying_key().as_bytes(), salt).await
+        dht.get_mutable_most_recent(signer.public().as_bytes(), salt).await
     {
         let mut new_value = most_recent.value().to_vec();
 
@@ -73,12 +73,12 @@ async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) 
 
     println!(
         "Stored mutable data as {:?} in {:?} milliseconds",
-        to_hex(signer.verifying_key().as_bytes()),
+        to_hex(signer.public().as_bytes()),
         start.elapsed().as_millis()
     );
 }
 
-fn from_hex(s: String) -> SigningKey {
+fn from_hex(s: String) -> SecretKey {
     if s.len() % 2 != 0 {
         panic!("Number of Hex characters should be even");
     }
@@ -91,7 +91,7 @@ fn from_hex(s: String) -> SigningKey {
         bytes.push(byte);
     }
 
-    SigningKey::try_from(bytes.as_slice()).expect("Invalid signing key")
+    SecretKey::try_from(bytes.as_slice()).expect("Invalid signing key")
 }
 
 fn to_hex(bytes: &[u8]) -> String {
