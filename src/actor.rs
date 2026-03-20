@@ -2,28 +2,24 @@ pub(crate) mod config;
 mod info;
 pub(crate) mod socket;
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
-use crate::common::SignedAnnounce;
 use crate::common::{
     FindNodeRequestArguments, Id, Message, MessageType, Node, PutRequestSpecific, RequestSpecific,
-    RequestTypeSpecific,
+    RequestTypeSpecific, SignedAnnounce,
 };
 use crate::core::{
     iterative_query::GetRequestSpecific, put_query::PutQuery, Core, PutError, Response,
 };
 use crate::MutableItem;
-use config::Config;
 
+use config::Config;
 use socket::KrpcSocket;
 
 pub use info::Info;
@@ -445,7 +441,7 @@ pub(crate) async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<Ac
                             },
                             None => {
                                 // All senders dropped, shutdown.
-                                tracing::debug!("dht::Dht's actor task was shutdown after Drop.");
+                                debug!("dht::Dht's actor task was shutdown after Drop.");
                                 break;
                             }
                         }

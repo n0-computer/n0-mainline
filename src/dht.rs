@@ -1,14 +1,12 @@
 //! Dht node.
 
-use std::{
-    io,
-    net::{Ipv4Addr, SocketAddrV4},
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use iroh_base::SecretKey;
 use futures_core::Stream;
+use iroh_base::SecretKey;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
