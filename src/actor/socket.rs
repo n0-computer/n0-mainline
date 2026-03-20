@@ -46,11 +46,10 @@ struct UdpIo {
 
 impl UdpIo {
     /// Bind to `addr`, configure via noq-udp, register with tokio reactor.
-    async fn bind(addr: SocketAddr) -> io::Result<Self> {
+    fn bind(addr: SocketAddr) -> io::Result<Self> {
         let std_socket = std::net::UdpSocket::bind(addr)?;
-        std_socket.set_nonblocking(true)?;
+        let state = noq_udp::UdpSocketState::new((&std_socket).into())?;
         let socket = UdpSocket::from_std(std_socket)?;
-        let state = noq_udp::UdpSocketState::new(noq_udp::UdpSockRef::from(&socket))?;
         Ok(Self { socket, state })
     }
 
@@ -72,7 +71,7 @@ impl UdpIo {
             self.socket.writable().await?;
             match self.socket.try_io(Interest::WRITABLE, || {
                 self.state
-                    .send(noq_udp::UdpSockRef::from(&self.socket), &transmit)
+                    .send((&self.socket).into(), &transmit)
             }) {
                 Ok(()) => return Ok(()),
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
@@ -101,7 +100,7 @@ impl UdpIo {
             let mut meta = [noq_udp::RecvMeta::default()];
             let n = self
                 .state
-                .recv(noq_udp::UdpSockRef::from(&self.socket), &mut iov, &mut meta)?;
+                .recv((&self.socket).into(), &mut iov, &mut meta)?;
             if n > 0 {
                 Ok((meta[0].len, meta[0].addr))
             } else {
@@ -138,11 +137,11 @@ impl KrpcSocket {
         let port = config.port;
 
         let io = if let Some(port) = port {
-            UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?
+            UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], port)))?
         } else {
-            match UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))).await {
+            match UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))) {
                 Ok(io) => Ok(io),
-                Err(_) => UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
+                Err(_) => UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], 0))),
             }?
         };
 
@@ -401,37 +400,16 @@ impl KrpcSocket {
     }
 }
 
-#[derive(Debug)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum SendMessageError {
     /// Errors related to parsing DHT messages.
+    #[error(transparent)]
     BencodeError(serde_bencode::Error),
 
+    #[error(transparent)]
     /// IO error
     IO(std::io::Error),
-}
-
-impl std::fmt::Display for SendMessageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BencodeError(e) => write!(f, "Failed to parse packet bytes: {e}"),
-            Self::IO(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for SendMessageError {}
-
-impl From<serde_bencode::Error> for SendMessageError {
-    fn from(e: serde_bencode::Error) -> Self {
-        Self::BencodeError(e)
-    }
-}
-
-impl From<std::io::Error> for SendMessageError {
-    fn from(e: std::io::Error) -> Self {
-        Self::IO(e)
-    }
 }
 
 // Same as SocketAddr::eq but ignores the ip if it is unspecified for testing reasons.
