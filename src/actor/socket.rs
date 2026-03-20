@@ -473,10 +473,6 @@ impl InflightRequests {
         self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)
     }
 
-    fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
     fn get(&self, key: u32) -> Option<&InflightRequest> {
         if let Ok(index) = self.find_by_tid(key) {
             if let Some(request) = self.requests.get(index) {
