@@ -926,8 +926,8 @@ pub enum DecodeMessageError {
     /// Invalid Id size
     InvalidIdSize(InvalidIdSize),
 
-    #[error("Invalid transaction id size (expected [u8;2] or [u8;4])")]
-    /// Invalid transaction id size (expected [u8;2] or [u8;4])
+    #[error("Invalid transaction id size (expected `[u8;2]` or `[u8;4]`)")]
+    /// Invalid transaction id size (expected `[u8;2]` or `[u8;4]`)
     InvalidTransactionIdSize,
 
     #[error("Wrong number of bytes for signed peers")]
