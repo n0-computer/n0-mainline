@@ -502,6 +502,11 @@ pub(crate) enum ActorMessage {
     ToBootstrap(oneshot::Sender<Vec<String>>),
 }
 
+/// Sender side for streaming GET query results back to the caller.
+///
+/// All variants use `mpsc::UnboundedSender` because `ResponseSender` must be `Clone`
+/// (multiple queries can share senders). `ClosestNodes` and `Immutable` only ever send
+/// a single value (like a oneshot), but `oneshot::Sender` is not `Clone`.
 #[derive(Debug, Clone)]
 pub(crate) enum ResponseSender {
     ClosestNodes(mpsc::UnboundedSender<Box<[Node]>>),
