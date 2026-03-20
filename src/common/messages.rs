@@ -891,60 +891,48 @@ fn signed_peer_to_bytes(peer: &([u8; 32], u64, [u8; 64])) -> [u8; 104] {
     bytes
 }
 
-#[derive(Debug)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum DecodeMessageError {
+    #[error("Expected message to be longer than 15 characters")]
     /// Expected message to be longer than 15 characters
     TooShort,
+
+    #[error("Expected message to start with 'd'")]
     /// Expected message to start with 'd'
     NotBencodeDictionary,
+
+    #[error("Wrong number of bytes for nodes")]
     /// Wrong number of bytes for nodes
     InvalidNodes4,
+
+    #[error("wrong number of bytes for port")]
     /// wrong number of bytes for port
     InvalidPortEncoding,
+
+    #[error("IPv6 is not yet implemented")]
     /// IPv6 is not yet implemented
     Ipv6Unsupported,
+
+    #[error("Wrong number of bytes for sockaddr")]
     /// Wrong number of bytes for sockaddr
     InvalidSocketAddrEncodingLength,
+
+    #[error(transparent)]
     /// Failed to parse packet bytes
     BencodeError(serde_bencode::Error),
+
+    #[error(transparent)]
     /// Invalid Id size
     InvalidIdSize(InvalidIdSize),
+
+    #[error("Invalid transaction id size (expected [u8;2] or [u8;4])")]
     /// Invalid transaction id size (expected [u8;2] or [u8;4])
     InvalidTransactionIdSize,
+
+    #[error("Wrong number of bytes for signed peers")]
     /// Wrong number of bytes for signed peers
     InvalidSignedPeersEncodingLength,
-}
-
-impl std::fmt::Display for DecodeMessageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TooShort => write!(f, "Expected message to be longer than 15 characters"),
-            Self::NotBencodeDictionary => write!(f, "Expected message to start with 'd'"),
-            Self::InvalidNodes4 => write!(f, "Wrong number of bytes for nodes"),
-            Self::InvalidPortEncoding => write!(f, "wrong number of bytes for port"),
-            Self::Ipv6Unsupported => write!(f, "IPv6 is not yet implemented"),
-            Self::InvalidSocketAddrEncodingLength => write!(f, "Wrong number of bytes for sockaddr"),
-            Self::BencodeError(e) => write!(f, "Failed to parse packet bytes: {e}"),
-            Self::InvalidIdSize(e) => write!(f, "{e}"),
-            Self::InvalidTransactionIdSize => write!(f, "Invalid transaction id size (expected [u8;2] or [u8;4])"),
-            Self::InvalidSignedPeersEncodingLength => write!(f, "Wrong number of bytes for signed peers"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeMessageError {}
-
-impl From<serde_bencode::Error> for DecodeMessageError {
-    fn from(e: serde_bencode::Error) -> Self {
-        Self::BencodeError(e)
-    }
-}
-
-impl From<InvalidIdSize> for DecodeMessageError {
-    fn from(e: InvalidIdSize) -> Self {
-        Self::InvalidIdSize(e)
-    }
 }
 
 #[cfg(test)]

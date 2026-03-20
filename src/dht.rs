@@ -533,37 +533,16 @@ impl<T> Stream for GetStream<T> {
     }
 }
 
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Put MutableItem errors.
-#[derive(Debug)]
 pub enum PutMutableError {
+    #[error(transparent)]
     /// Common PutQuery errors
     Query(PutQueryError),
 
+    #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
     Concurrency(ConcurrencyError),
-}
-
-impl std::fmt::Display for PutMutableError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Query(e) => write!(f, "{e}"),
-            Self::Concurrency(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for PutMutableError {}
-
-impl From<PutQueryError> for PutMutableError {
-    fn from(e: PutQueryError) -> Self {
-        Self::Query(e)
-    }
-}
-
-impl From<ConcurrencyError> for PutMutableError {
-    fn from(e: ConcurrencyError) -> Self {
-        Self::Concurrency(e)
-    }
 }
 
 #[cfg(test)]

@@ -221,37 +221,20 @@ impl std::fmt::Display for InvalidIdSize {
     }
 }
 
-#[derive(Debug)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum DecodeIdError {
     /// Id is expected to by 20 bytes.
+    #[error(transparent)]
     InvalidIdSize(InvalidIdSize),
 
+    #[error("Hex encoding should contain an even number of hex characters")]
     /// Hex encoding should contain an even number of hex characters
     OddNumberOfCharacters,
 
     /// Invalid hex character
+    #[error("Invalid Id encoding")]
     InvalidHexCharacter(String),
-}
-
-impl std::fmt::Display for DecodeIdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidIdSize(e) => write!(f, "{e}"),
-            Self::OddNumberOfCharacters => {
-                write!(f, "Hex encoding should contain an even number of hex characters")
-            }
-            Self::InvalidHexCharacter(s) => write!(f, "Invalid Id encoding: {s}"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeIdError {}
-
-impl From<InvalidIdSize> for DecodeIdError {
-    fn from(e: InvalidIdSize) -> Self {
-        Self::InvalidIdSize(e)
-    }
 }
 
 #[cfg(test)]

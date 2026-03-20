@@ -24,6 +24,7 @@ lru = { version = "0.13.0", default-features = false }
 dyn-clone = "1.0.18"
 tokio = { version = "1", features = ["sync", "net", "time", "rt", "macros"] }
 futures-core = "0.3"
+n0-error = "0.1"
 noq-udp = "0.9"
 
 [dev-dependencies]

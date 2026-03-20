@@ -197,70 +197,43 @@ impl PutQuery {
     }
 }
 
-#[derive(Debug, Clone)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
+#[derive(Clone)]
 /// PutQuery errors
 pub enum PutError {
     /// Common PutQuery errors
+    #[error(transparent)]
     Query(PutQueryError),
 
+    #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
     Concurrency(ConcurrencyError),
 }
 
-impl std::fmt::Display for PutError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Query(e) => write!(f, "{e}"),
-            Self::Concurrency(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for PutError {}
-
-impl From<PutQueryError> for PutError {
-    fn from(e: PutQueryError) -> Self {
-        Self::Query(e)
-    }
-}
-
-impl From<ConcurrencyError> for PutError {
-    fn from(e: ConcurrencyError) -> Self {
-        Self::Concurrency(e)
-    }
-}
-
-#[derive(Debug, Clone)]
+#[n0_error::stack_error(derive, std_sources)]
+#[derive(Clone)]
 /// Common PutQuery errors
 pub enum PutQueryError {
     /// Failed to find any nodes close, usually means dht node failed to bootstrap,
     /// so the routing table is empty. Check the machine's access to UDP socket,
     /// or find better bootstrapping nodes.
+    #[error("Failed to find any nodes close to store value at")]
     NoClosestNodes,
 
     /// Either Put Query failed to store at any nodes, and most nodes responded
     /// with a non `301` nor `302` errors.
     ///
     /// Either way; contains the most common error response.
+    #[error("Query Error Response")]
     ErrorResponse(ErrorSpecific),
 
     /// PutQuery timed out with no responses neither success or errors
+    #[error("PutQuery timed out with no responses neither success or errors")]
     Timeout,
 }
 
-impl std::fmt::Display for PutQueryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoClosestNodes => write!(f, "Failed to find any nodes close to store value at"),
-            Self::ErrorResponse(_) => write!(f, "Query Error Response"),
-            Self::Timeout => write!(f, "PutQuery timed out with no responses neither success or errors"),
-        }
-    }
-}
-
-impl std::error::Error for PutQueryError {}
-
-#[derive(Debug, Clone)]
+#[n0_error::stack_error(derive, std_sources)]
+#[derive(Clone)]
 /// PutQuery for [crate::MutableItem] errors
 pub enum ConcurrencyError {
     /// Trying to PUT mutable items with the same `key`, and `salt` but different `seq`.
@@ -272,25 +245,16 @@ pub enum ConcurrencyError {
     ///
     /// Try reading most recent mutable item before writing again,
     /// and make sure to set the `cas` field.
+    #[error("Conflict risk, try reading most recent item before writing again.")]
     ConflictRisk,
 
     /// The [crate::MutableItem::seq] is less than or equal the sequence from another signed item.
     ///
     /// Try reading most recent mutable item before writing again.
+    #[error("MutableItem::seq is not the most recent, try reading most recent item before writing again.")]
     NotMostRecent,
 
     /// The `CAS` condition does not match the `seq` of the most recent known signed item.
+    #[error("CAS check failed, try reading most recent item before writing again.")]
     CasFailed,
 }
-
-impl std::fmt::Display for ConcurrencyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ConflictRisk => write!(f, "Conflict risk, try reading most recent item before writing again."),
-            Self::NotMostRecent => write!(f, "MutableItem::seq is not the most recent, try reading most recent item before writing again."),
-            Self::CasFailed => write!(f, "CAS check failed, try reading most recent item before writing again."),
-        }
-    }
-}
-
-impl std::error::Error for ConcurrencyError {}

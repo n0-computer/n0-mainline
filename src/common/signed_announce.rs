@@ -119,30 +119,21 @@ pub fn encode_signable(info_hash: &Id, timestamp: u64) -> Box<[u8]> {
     signable.into()
 }
 
-#[derive(Debug)]
+#[n0_error::stack_error(derive, std_sources)]
 /// Mainline crate error enum.
 pub enum SignedAnnounceError {
+    #[error("Invalid signed announce signature")]
     /// Invalid signed announce signature
     Signature,
 
+    #[error("Invalid signed announce public key")]
     /// Invalid signed announce public key
     PublicKey,
 
+    #[error("Invalid signed announce timestamp (too far in the future or the past)")]
     /// Invalid signed announce timestamp
     Timestamp,
 }
-
-impl std::fmt::Display for SignedAnnounceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Signature => write!(f, "Invalid signed announce signature"),
-            Self::PublicKey => write!(f, "Invalid signed announce public key"),
-            Self::Timestamp => write!(f, "Invalid signed announce timestamp (too far in the future or the past)"),
-        }
-    }
-}
-
-impl std::error::Error for SignedAnnounceError {}
 
 #[cfg(test)]
 mod tests {
