@@ -1,6 +1,7 @@
 //! Dht node.
 
 use std::{
+    io,
     net::{Ipv4Addr, SocketAddrV4},
     pin::Pin,
     task::{Context, Poll},
@@ -103,7 +104,7 @@ impl DhtBuilder {
     }
 
     /// Create a [Dht] node.
-    pub async fn build(&self) -> Result<Dht, std::io::Error> {
+    pub async fn build(&self) -> io::Result<Dht> {
         Dht::new(self.0.clone()).await
     }
 }
@@ -113,7 +114,7 @@ impl Dht {
     ///
     /// Could return an error if it failed to bind to the specified
     /// port or other io errors while binding the udp socket.
-    pub async fn new(config: Config) -> Result<Self, std::io::Error> {
+    pub async fn new(config: Config) -> io::Result<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let (check_tx, check_rx) = oneshot::channel();
@@ -136,13 +137,13 @@ impl Dht {
     }
 
     /// Create a new DHT client with default bootstrap nodes.
-    pub async fn client() -> Result<Self, std::io::Error> {
+    pub async fn client() -> io::Result<Self> {
         Dht::builder().build().await
     }
 
     /// Create a new DHT node that is running in [Server mode][DhtBuilder::server_mode] as
     /// soon as possible.
-    pub async fn server() -> Result<Self, std::io::Error> {
+    pub async fn server() -> io::Result<Self> {
         Dht::builder().server_mode().build().await
     }
 
@@ -514,7 +515,7 @@ impl Dht {
 
     // === Private Methods ===
 
-    pub(crate) fn send(&self, message: ActorMessage) {
+    fn send(&self, message: ActorMessage) {
         self.0
             .send(message)
             .expect("actor task unexpectedly shutdown");

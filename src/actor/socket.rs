@@ -21,9 +21,9 @@ use super::config::Config;
 
 const MTU: usize = 2048;
 
-pub const DEFAULT_PORT: u16 = 6881;
+const DEFAULT_PORT: u16 = 6881;
 
-pub const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
@@ -133,7 +133,7 @@ pub struct KrpcSocket {
 }
 
 impl KrpcSocket {
-    pub(crate) async fn new(config: &Config) -> Result<Self, std::io::Error> {
+    pub(crate) async fn new(config: &Config) -> io::Result<Self> {
         let port = config.port;
 
         let io = if let Some(port) = port {
@@ -167,7 +167,7 @@ impl KrpcSocket {
     }
 
     #[cfg(test)]
-    pub(crate) async fn server() -> Result<Self, std::io::Error> {
+    pub(crate) async fn server() -> io::Result<Self> {
         Self::new(&Config {
             server_mode: true,
             ..Default::default()
@@ -176,7 +176,7 @@ impl KrpcSocket {
     }
 
     #[cfg(test)]
-    pub(crate) async fn client() -> Result<Self, std::io::Error> {
+    pub(crate) async fn client() -> io::Result<Self> {
         Self::new(&Config::default()).await
     }
 
@@ -402,7 +402,7 @@ impl KrpcSocket {
 
 #[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
-pub enum SendMessageError {
+enum SendMessageError {
     /// Errors related to parsing DHT messages.
     #[error(transparent)]
     BencodeError(serde_bencode::Error),
@@ -425,7 +425,7 @@ fn compare_socket_addr(a: &SocketAddrV4, b: &SocketAddrV4) -> bool {
     a.ip() == b.ip()
 }
 
-pub struct InflightRequest {
+struct InflightRequest {
     tid: u32,
     to: SocketAddrV4,
     sent_at: Instant,

@@ -4,6 +4,7 @@ pub(crate) mod socket;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ pub use info::Info;
 
 #[derive(Debug)]
 /// Internal Rpc called in the Dht thread loop, useful to create your own actor setup.
-pub struct Actor {
+struct Actor {
     pub(crate) socket: KrpcSocket,
     core: Core,
 
@@ -39,7 +40,7 @@ pub struct Actor {
 
 impl Actor {
     /// Create a new actor
-    pub async fn new(config: config::Config) -> Result<Self, std::io::Error> {
+    async fn new(config: config::Config) -> io::Result<Self> {
         let id = if let Some(ip) = config.public_ip {
             Id::from_ip(ip.into())
         } else {
@@ -78,13 +79,13 @@ impl Actor {
     // === Getters ===
 
     /// Returns the node's Id
-    pub fn id(&self) -> &Id {
+    fn id(&self) -> &Id {
         self.core.routing_table.id()
     }
 
     /// Create a list of unique bootstrapping nodes from all our
     /// routing table to use as `extra_bootsrtap` in next sessions.
-    pub fn to_bootstrap(&self) -> Vec<String> {
+    fn to_bootstrap(&self) -> Vec<String> {
         let mut set = HashSet::new();
         for s in self.core.routing_table.to_bootstrap() {
             set.insert(s);
@@ -98,7 +99,7 @@ impl Actor {
 
     /// Returns a thread safe and lightweight summary of this node's
     /// information and statistics.
-    pub fn info(&self) -> Info {
+    fn info(&self) -> Info {
         Info::from(self)
     }
 
@@ -107,7 +108,7 @@ impl Actor {
     /// Advance the inflight queries, receive incoming requests,
     /// maintain the routing table, and everything else that needs
     /// to happen at every tick.
-    pub fn tick(&mut self) {
+    fn tick(&mut self) {
         self.periodic_node_maintaenance();
 
         let mut done_put_queries = self.check_done_put_queries();
@@ -157,7 +158,7 @@ impl Actor {
     }
 
     /// Process an incoming message from the network.
-    pub fn process_message(&mut self, message: Message, from: SocketAddrV4) {
+    fn process_message(&mut self, message: Message, from: SocketAddrV4) {
         let new_query_response = self.handle_incoming_message(message, from);
 
         // Response for an ongoing GET query
@@ -172,7 +173,7 @@ impl Actor {
 
     /// Store a value in the closest nodes, optionally trigger a lookup query if
     /// the cached closest_nodes aren't fresh enough.
-    pub fn put(
+    fn put(
         &mut self,
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
@@ -194,7 +195,7 @@ impl Actor {
     }
 
     /// Send a message to closer and closer nodes until we can't find any more nodes.
-    pub fn get(
+    fn get(
         &mut self,
         request: GetRequestSpecific,
         extra_nodes: Option<&[SocketAddrV4]>,
@@ -381,7 +382,7 @@ impl Actor {
 }
 
 /// Async event loop for the actor.
-pub async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMessage>) {
+pub(crate) async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMessage>) {
     match Actor::new(config).await {
         Ok(mut actor) => {
             // Maintenance interval
@@ -407,7 +408,7 @@ pub async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMess
 
                                     match actor.put(request, extra_nodes) {
                                         Ok(()) => {
-                                            let senders = actor.put_senders.entry(target).or_insert(vec![]);
+                                            let senders = actor.put_senders.entry(target).or_default();
                                             senders.push(sender);
                                         }
                                         Err(error) => {
@@ -423,7 +424,7 @@ pub async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMess
                                         send(&sender, response);
                                     }
 
-                                    let senders = actor.get_senders.entry(target).or_insert(vec![]);
+                                    let senders = actor.get_senders.entry(target).or_default();
                                     senders.push(sender);
                                 }
                                 ActorMessage::ToBootstrap(sender) => {
@@ -485,12 +486,12 @@ pub(crate) enum ActorMessage {
         Option<Box<[Node]>>,
     ),
     Get(GetRequestSpecific, ResponseSender),
-    Check(oneshot::Sender<Result<(), std::io::Error>>),
+    Check(oneshot::Sender<io::Result<()>>),
     ToBootstrap(oneshot::Sender<Vec<String>>),
 }
 
 #[derive(Debug, Clone)]
-pub enum ResponseSender {
+pub(crate) enum ResponseSender {
     ClosestNodes(mpsc::UnboundedSender<Box<[Node]>>),
     Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
     SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
