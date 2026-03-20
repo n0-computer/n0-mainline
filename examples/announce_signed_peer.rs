@@ -32,7 +32,7 @@ async fn main() {
 
     let dht = Dht::client().await.unwrap();
 
-    let signer = from_hex(cli.secret_key);
+    let signer: SecretKey = cli.secret_key.parse().expect("Invalid secret key");
 
     println!(
         "\nAnnouncing signed peer {} on an infohash: {} ...\n",
@@ -60,24 +60,6 @@ async fn announce(dht: &Dht, info_hash: Id, signer: &SecretKey) {
     );
 }
 
-fn from_hex(s: String) -> SecretKey {
-    if s.len() % 2 != 0 {
-        panic!("Number of Hex characters should be even");
-    }
-
-    let mut bytes = Vec::with_capacity(s.len() / 2);
-
-    for i in 0..s.len() / 2 {
-        let byte_str = &s[i * 2..(i * 2) + 2];
-        let byte = u8::from_str_radix(byte_str, 16).expect("Invalid hex character");
-        bytes.push(byte);
-    }
-
-    SecretKey::try_from(bytes.as_slice()).expect("Invalid signing key")
-}
-
 fn to_hex(bytes: &[u8]) -> String {
-    let hex_chars: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
-
-    hex_chars
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
 }

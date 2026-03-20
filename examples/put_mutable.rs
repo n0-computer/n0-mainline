@@ -1,4 +1,4 @@
-use std::{convert::TryFrom, time::Instant};
+use std::time::Instant;
 
 use dht::{Dht, MutableItem, SecretKey};
 
@@ -26,7 +26,7 @@ async fn main() {
 
     let dht = Dht::client().await.unwrap();
 
-    let signer = from_hex(cli.secret_key);
+    let signer: SecretKey = cli.secret_key.parse().expect("Invalid secret key");
 
     println!(
         "\nStoring mutable data: \"{}\" for public_key: {}  ...",
@@ -44,8 +44,9 @@ async fn main() {
 async fn put(dht: &Dht, signer: &SecretKey, value: &[u8], salt: Option<&[u8]>) {
     let start = Instant::now();
 
-    let (item, cas) = if let Some(most_recent) =
-        dht.get_mutable_most_recent(signer.public().as_bytes(), salt).await
+    let (item, cas) = if let Some(most_recent) = dht
+        .get_mutable_most_recent(signer.public().as_bytes(), salt)
+        .await
     {
         let mut new_value = most_recent.value().to_vec();
 
@@ -78,24 +79,6 @@ async fn put(dht: &Dht, signer: &SecretKey, value: &[u8], salt: Option<&[u8]>) {
     );
 }
 
-fn from_hex(s: String) -> SecretKey {
-    if s.len() % 2 != 0 {
-        panic!("Number of Hex characters should be even");
-    }
-
-    let mut bytes = Vec::with_capacity(s.len() / 2);
-
-    for i in 0..s.len() / 2 {
-        let byte_str = &s[i * 2..(i * 2) + 2];
-        let byte = u8::from_str_radix(byte_str, 16).expect("Invalid hex character");
-        bytes.push(byte);
-    }
-
-    SecretKey::try_from(bytes.as_slice()).expect("Invalid signing key")
-}
-
 fn to_hex(bytes: &[u8]) -> String {
-    let hex_chars: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
-
-    hex_chars
+    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
