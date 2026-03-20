@@ -456,7 +456,8 @@ pub(crate) async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<Ac
                         }
                     }
                     _ = maintenance.tick() => {
-                        // Periodic maintenance (routing table refresh, pings, etc.)
+                        // Wake the loop so actor.tick() runs even when idle,
+                        // ensuring routing table refresh and node pings happen on schedule.
                     }
                 }
 
