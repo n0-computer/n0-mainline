@@ -1,9 +1,16 @@
 //! UDP socket layer managing incoming/outgoing requests and responses.
+//!
+//! Uses [`noq_udp`] for all socket I/O (`sendmsg`/`recvmsg`) with optimal
+//! platform-specific configuration (ECN, buffer sizes, MTU discovery).
+//! Async readiness is driven by [`tokio::net::UdpSocket`] via `try_io`.
 
+use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::io::ErrorKind;
-use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
+use std::io::{self, ErrorKind, IoSliceMut};
+use std::net::{SocketAddr, SocketAddrV4};
 use std::time::{Duration, Instant};
+use tokio::io::Interest;
+use tokio::net::UdpSocket;
 use tracing::{debug, trace, warn};
 
 use crate::common::{ErrorSpecific, Message, MessageType, RequestSpecific, ResponseSpecific};
@@ -16,58 +23,140 @@ const MTU: usize = 2048;
 
 pub const DEFAULT_PORT: u16 = 6881;
 
-/// Minimum interval between polling udp socket, lower latency, higher cpu usage.
-/// Useful for checking for expected responses.
-pub const MIN_POLL_INTERVAL: Duration = Duration::from_micros(100);
-/// Maximum interval between polling udp socket, higher latency, lower cpu usage.
-/// Useful for waiting for incoming requests, and [super::Actor::periodic_node_maintaenance].
-pub const MAX_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
 const LEGACY_VERSION: [u8; 4] = [82, 83, 0, 5]; // "RS" version 05
 
+// ---------------------------------------------------------------------------
+// UdpIo – thin async wrapper around noq-udp + tokio readiness
+// ---------------------------------------------------------------------------
+
+/// Async UDP I/O backed by [`noq_udp`].
+///
+/// [`tokio::net::UdpSocket`] provides readiness notifications (epoll/kqueue);
+/// [`noq_udp::UdpSocketState`] performs the actual `sendmsg`/`recvmsg` syscalls
+/// with platform-optimal settings.
+#[derive(Debug)]
+struct UdpIo {
+    socket: UdpSocket,
+    state: noq_udp::UdpSocketState,
+}
+
+impl UdpIo {
+    /// Bind to `addr`, configure via noq-udp, register with tokio reactor.
+    async fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let std_socket = std::net::UdpSocket::bind(addr)?;
+        std_socket.set_nonblocking(true)?;
+        let socket = UdpSocket::from_std(std_socket)?;
+        let state = noq_udp::UdpSocketState::new(noq_udp::UdpSockRef::from(&socket))?;
+        Ok(Self { socket, state })
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Send `buf` to `dest`. Waits for writability, then calls
+    /// noq-udp `sendmsg`.
+    async fn send_to(&self, buf: &[u8], dest: SocketAddr) -> io::Result<()> {
+        let transmit = noq_udp::Transmit {
+            destination: dest,
+            ecn: None,
+            contents: buf,
+            segment_size: None,
+            src_ip: None,
+        };
+        loop {
+            self.socket.writable().await?;
+            match self.socket.try_io(Interest::WRITABLE, || {
+                self.state
+                    .send(noq_udp::UdpSockRef::from(&self.socket), &transmit)
+            }) {
+                Ok(()) => return Ok(()),
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Receive one datagram. Waits for readability, then calls
+    /// noq-udp `recvmsg`.
+    async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        loop {
+            self.socket.readable().await?;
+            match self.try_recv(buf) {
+                Ok(result) => return Ok(result),
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Non-blocking receive attempt via `try_io` + noq-udp `recvmsg`.
+    fn try_recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.socket.try_io(Interest::READABLE, || {
+            let mut iov = [IoSliceMut::new(buf)];
+            let mut meta = [noq_udp::RecvMeta::default()];
+            let n = self
+                .state
+                .recv(noq_udp::UdpSockRef::from(&self.socket), &mut iov, &mut meta)?;
+            if n > 0 {
+                Ok((meta[0].len, meta[0].addr))
+            } else {
+                Err(io::Error::new(ErrorKind::WouldBlock, "no data"))
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KrpcSocket – KRPC message framing on top of UdpIo
+// ---------------------------------------------------------------------------
+
 /// A UdpSocket wrapper that formats and correlates DHT requests and responses.
+///
+/// Sends are queued synchronously and flushed asynchronously via [`Self::flush`].
+/// Receives are fully async via [`Self::recv_from_async`].
 #[derive(Debug)]
 pub struct KrpcSocket {
-    socket: UdpSocket,
+    io: UdpIo,
     pub(crate) server_mode: bool,
     local_addr: SocketAddrV4,
 
     inflight_requests: InflightRequests,
-    poll_interval: Duration,
+    /// Outgoing packets queued by sync send methods.
+    outbox: VecDeque<(Vec<u8>, SocketAddr)>,
 
     #[cfg(test)]
     version: [u8; 4],
 }
 
 impl KrpcSocket {
-    pub(crate) fn new(config: &Config) -> Result<Self, std::io::Error> {
+    pub(crate) async fn new(config: &Config) -> Result<Self, std::io::Error> {
         let port = config.port;
 
-        let socket = if let Some(port) = port {
-            UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port)))?
+        let io = if let Some(port) = port {
+            UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?
         } else {
-            match UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))) {
-                Ok(socket) => Ok(socket),
-                Err(_) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))),
+            match UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))).await {
+                Ok(io) => Ok(io),
+                Err(_) => UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
             }?
         };
 
-        let local_addr = match socket.local_addr()? {
+        let local_addr = match io.local_addr()? {
             SocketAddr::V4(addr) => addr,
             SocketAddr::V6(_) => unimplemented!("KrpcSocket does not support Ipv6"),
         };
 
-        socket.set_read_timeout(Some(MIN_POLL_INTERVAL))?;
-
         Ok(Self {
-            socket,
+            io,
             server_mode: config.server_mode,
             inflight_requests: InflightRequests::new(),
             local_addr,
-            poll_interval: MIN_POLL_INTERVAL,
+            outbox: VecDeque::new(),
 
             #[cfg(test)]
             version: if config.disable_announce_signed_peers {
@@ -79,16 +168,17 @@ impl KrpcSocket {
     }
 
     #[cfg(test)]
-    pub(crate) fn server() -> Result<Self, std::io::Error> {
+    pub(crate) async fn server() -> Result<Self, std::io::Error> {
         Self::new(&Config {
             server_mode: true,
             ..Default::default()
         })
+        .await
     }
 
     #[cfg(test)]
-    pub(crate) fn client() -> Result<Self, std::io::Error> {
-        Self::new(&Config::default())
+    pub(crate) async fn client() -> Result<Self, std::io::Error> {
+        Self::new(&Config::default()).await
     }
 
     // === Getters ===
@@ -106,7 +196,8 @@ impl KrpcSocket {
         self.inflight_requests.get(*transaction_id).is_some()
     }
 
-    /// Send a request to the given address and return the transaction_id
+    /// Send a request to the given address and return the transaction_id.
+    /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn request(&mut self, address: SocketAddrV4, request: RequestSpecific) -> u32 {
         let transaction_id = self.inflight_requests.add(address);
 
@@ -114,17 +205,15 @@ impl KrpcSocket {
         trace!(context = "socket_message_sending", message = ?message);
 
         let tid = message.transaction_id;
-        let _ = self.send(address, message).map_err(|e| {
-            debug!(?e, "Error sending request message");
+        let _ = self.enqueue(address, message).map_err(|e| {
+            debug!(?e, "Error encoding request message");
         });
-
-        self.poll_interval = MIN_POLL_INTERVAL;
-        let _ = self.socket.set_read_timeout(Some(self.poll_interval));
 
         tid
     }
 
     /// Send a response to the given address.
+    /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn response(
         &mut self,
         address: SocketAddrV4,
@@ -134,38 +223,37 @@ impl KrpcSocket {
         let message =
             self.response_message(MessageType::Response(response), address, transaction_id);
         trace!(context = "socket_message_sending", message = ?message);
-        let _ = self.send(address, message).map_err(|e| {
-            debug!(?e, "Error sending response message");
+        let _ = self.enqueue(address, message).map_err(|e| {
+            debug!(?e, "Error encoding response message");
         });
     }
 
     /// Send an error to the given address.
+    /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn error(&mut self, address: SocketAddrV4, transaction_id: u32, error: ErrorSpecific) {
         let message = self.response_message(MessageType::Error(error), address, transaction_id);
-        let _ = self.send(address, message).map_err(|e| {
-            debug!(?e, "Error sending error message");
+        let _ = self.enqueue(address, message).map_err(|e| {
+            debug!(?e, "Error encoding error message");
         });
     }
 
-    /// Receives a single krpc message on the socket.
-    /// On success, returns the dht message and the origin.
-    pub fn recv_from(&mut self) -> Option<(Message, SocketAddrV4)> {
+    /// Flush all queued outgoing packets.
+    pub async fn flush(&mut self) {
+        while let Some((bytes, addr)) = self.outbox.pop_front() {
+            if let Err(e) = self.io.send_to(&bytes, addr).await {
+                debug!(?e, "Error sending UDP packet");
+            }
+        }
+    }
+
+    /// Async receive: waits for a datagram and returns a parsed KRPC message.
+    pub async fn recv_from_async(&mut self) -> Option<(Message, SocketAddrV4)> {
         let mut buf = [0u8; MTU];
 
         self.inflight_requests.cleanup();
 
-        match self.socket.recv_from(&mut buf) {
+        match self.io.recv_from(&mut buf).await {
             Ok((amt, SocketAddr::V4(from))) => {
-                if self.poll_interval > MIN_POLL_INTERVAL {
-                    // More eagerness if we are expecting responses than requests;
-                    if !self.inflight_requests.is_empty() {
-                        self.poll_interval = MIN_POLL_INTERVAL;
-                    } else if self.server_mode {
-                        self.poll_interval = (self.poll_interval / 2).max(MIN_POLL_INTERVAL);
-                    }
-                    let _ = self.socket.set_read_timeout(Some(self.poll_interval));
-                }
-
                 let bytes = &buf[..amt];
 
                 if from.port() == 0 {
@@ -231,21 +319,9 @@ impl KrpcSocket {
             Ok((_, SocketAddr::V6(_))) => {
                 // Ignore unsupported Ipv6 messages
             }
-            Err(error) => match error.kind() {
-                ErrorKind::WouldBlock => {
-                    if self.poll_interval < MAX_POLL_INTERVAL {
-                        self.poll_interval =
-                            (self.poll_interval.mul_f32(1.1)).min(MAX_POLL_INTERVAL);
-                        let _ = self.socket.set_read_timeout(Some(self.poll_interval));
-
-                        // Too noisy, only uncomment when you suspect there is a performance issue..
-                        // trace!("Increased poll_interval {:?}", self.poll_interval);
-                    }
-                }
-                _ => {
-                    warn!("IO error {error}")
-                }
-            },
+            Err(error) => {
+                warn!("IO error {error}")
+            }
         };
 
         None
@@ -312,24 +388,50 @@ impl KrpcSocket {
         return VERSION;
     }
 
-    /// Send a raw dht message
-    fn send(&mut self, address: SocketAddrV4, message: Message) -> Result<(), SendMessageError> {
-        self.socket.send_to(&message.to_bytes()?, address)?;
+    /// Encode a message and queue it for sending.
+    fn enqueue(
+        &mut self,
+        address: SocketAddrV4,
+        message: Message,
+    ) -> Result<(), SendMessageError> {
+        let bytes = message.to_bytes()?;
         trace!(context = "socket_message_sending", message = ?message);
+        self.outbox.push_back((bytes, SocketAddr::from(address)));
         Ok(())
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 /// Mainline crate error enum.
 pub enum SendMessageError {
     /// Errors related to parsing DHT messages.
-    #[error("Failed to parse packet bytes: {0}")]
-    BencodeError(#[from] serde_bencode::Error),
+    BencodeError(serde_bencode::Error),
 
-    #[error(transparent)]
-    /// Transparent [std::io::Error]
-    IO(#[from] std::io::Error),
+    /// IO error
+    IO(std::io::Error),
+}
+
+impl std::fmt::Display for SendMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BencodeError(e) => write!(f, "Failed to parse packet bytes: {e}"),
+            Self::IO(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SendMessageError {}
+
+impl From<serde_bencode::Error> for SendMessageError {
+    fn from(e: serde_bencode::Error) -> Self {
+        Self::BencodeError(e)
+    }
+}
+
+impl From<std::io::Error> for SendMessageError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IO(e)
+    }
 }
 
 // Same as SocketAddr::eq but ignores the ip if it is unspecified for testing reasons.
@@ -520,8 +622,6 @@ fn supports_request(version: &[u8; 4], request_specific: &crate::common::Request
 
 #[cfg(test)]
 mod test {
-    use std::thread;
-
     use crate::{
         common::{Id, PingResponseArguments, RequestTypeSpecific},
         core::VERSION,
@@ -529,26 +629,27 @@ mod test {
 
     use super::*;
 
-    #[test]
-    fn tid() {
-        let mut socket = KrpcSocket::server().unwrap();
+    #[tokio::test]
+    async fn tid() {
+        let socket = KrpcSocket::server().await.unwrap();
 
-        assert_eq!(socket.inflight_requests.tid(), 0);
-        assert_eq!(socket.inflight_requests.tid(), 1);
-        assert_eq!(socket.inflight_requests.tid(), 2);
+        let mut requests = socket.inflight_requests;
+        assert_eq!(requests.tid(), 0);
+        assert_eq!(requests.tid(), 1);
+        assert_eq!(requests.tid(), 2);
 
-        socket.inflight_requests.next_tid = u32::MAX;
+        requests.next_tid = u32::MAX;
 
-        assert_eq!(socket.inflight_requests.tid(), u32::MAX);
-        assert_eq!(socket.inflight_requests.tid(), 0);
+        assert_eq!(requests.tid(), u32::MAX);
+        assert_eq!(requests.tid(), 0);
     }
 
-    #[test]
-    fn recv_request() {
-        let mut server = KrpcSocket::server().unwrap();
+    #[tokio::test]
+    async fn recv_request() {
+        let mut server = KrpcSocket::server().await.unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
 
-        let mut client = KrpcSocket::client().unwrap();
+        let mut client = KrpcSocket::client().await.unwrap();
         client.inflight_requests.next_tid = 120;
 
         let client_address = client.local_addr();
@@ -559,74 +660,67 @@ mod test {
 
         let expected_request = request.clone();
 
-        let server_thread = thread::spawn(move || loop {
-            if let Some((message, from)) = server.recv_from() {
-                assert_eq!(from.port(), client_address.port());
-                assert_eq!(message.transaction_id, 120);
-                assert!(message.read_only, "Read-only should be true");
-                assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
-                assert_eq!(message.message_type, MessageType::Request(expected_request));
-                break;
-            }
-        });
-
         client.request(server_address, request);
+        client.flush().await;
 
-        server_thread.join().unwrap();
+        let (message, from) = loop {
+            if let Some(result) = server.recv_from_async().await {
+                break result;
+            }
+        };
+
+        assert_eq!(from.port(), client_address.port());
+        assert_eq!(message.transaction_id, 120);
+        assert!(message.read_only, "Read-only should be true");
+        assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
+        assert_eq!(message.message_type, MessageType::Request(expected_request));
     }
 
-    #[test]
-    fn recv_response() {
-        let (tx, rx) = flume::bounded(1);
-
-        let mut client = KrpcSocket::client().unwrap();
+    #[tokio::test]
+    async fn recv_response() {
+        let mut client = KrpcSocket::client().await.unwrap();
         let client_address = client.local_addr();
+
+        let mut server = KrpcSocket::client().await.unwrap();
+        let server_address =
+            SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
 
         let responder_id = Id::random();
         let response = ResponseSpecific::Ping(PingResponseArguments { responder_id });
 
-        let server_thread = thread::spawn(move || {
-            let mut server = KrpcSocket::client().unwrap();
-            let server_address =
-                SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
-            tx.send(server_address).unwrap();
-
-            server.inflight_requests.requests.push(InflightRequest {
-                tid: 8,
-                to: client_address,
-                sent_at: Instant::now(),
-            });
-
-            loop {
-                if let Some((message, from)) = server.recv_from() {
-                    assert_eq!(from.port(), client_address.port());
-                    assert_eq!(message.transaction_id, 8);
-                    assert!(message.read_only, "Read-only should be true");
-                    assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
-                    assert_eq!(
-                        message.message_type,
-                        MessageType::Response(ResponseSpecific::Ping(PingResponseArguments {
-                            responder_id,
-                        }))
-                    );
-                    break;
-                }
-            }
+        server.inflight_requests.requests.push(InflightRequest {
+            tid: 8,
+            to: client_address,
+            sent_at: Instant::now(),
         });
 
-        let server_address = rx.recv().unwrap();
-
         client.response(server_address, 8, response);
+        client.flush().await;
 
-        server_thread.join().unwrap();
+        let (message, from) = loop {
+            if let Some(result) = server.recv_from_async().await {
+                break result;
+            }
+        };
+
+        assert_eq!(from.port(), client_address.port());
+        assert_eq!(message.transaction_id, 8);
+        assert!(message.read_only, "Read-only should be true");
+        assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
+        assert_eq!(
+            message.message_type,
+            MessageType::Response(ResponseSpecific::Ping(PingResponseArguments {
+                responder_id,
+            }))
+        );
     }
 
-    #[test]
-    fn ignore_response_from_wrong_address() {
-        let mut server = KrpcSocket::client().unwrap();
+    #[tokio::test]
+    async fn ignore_response_from_wrong_address() {
+        let mut server = KrpcSocket::client().await.unwrap();
         let server_address = server.local_addr();
 
-        let mut client = KrpcSocket::client().unwrap();
+        let mut client = KrpcSocket::client().await.unwrap();
 
         let client_address = client.local_addr();
 
@@ -640,24 +734,25 @@ mod test {
             responder_id: Id::random(),
         });
 
-        let _ = response.clone();
-
-        let server_thread = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(5));
-            assert!(
-                server.recv_from().is_none(),
-                "Should not receive a response from wrong address"
-            );
-        });
-
         client.response(server_address, 8, response);
+        client.flush().await;
 
-        server_thread.join().unwrap();
+        // Use a timeout to avoid hanging - recv should not return a valid response
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            server.recv_from_async(),
+        )
+        .await;
+
+        assert!(
+            result.is_err() || result.unwrap().is_none(),
+            "Should not receive a response from wrong address"
+        );
     }
 
-    #[test]
-    fn inflight_request_timeout() {
-        let mut server = KrpcSocket::client().unwrap();
+    #[tokio::test]
+    async fn inflight_request_timeout() {
+        let mut server = KrpcSocket::client().await.unwrap();
 
         let tid = 8;
         let sent_at = Instant::now();
@@ -668,7 +763,7 @@ mod test {
             sent_at,
         });
 
-        std::thread::sleep(server.inflight_requests.request_timeout());
+        tokio::time::sleep(server.inflight_requests.request_timeout()).await;
 
         assert!(!server.inflight(&tid));
     }

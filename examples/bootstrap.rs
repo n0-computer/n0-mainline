@@ -1,6 +1,7 @@
 use dht::Dht;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -8,22 +9,23 @@ fn main() {
         )
         .init();
 
-    let client = Dht::server().unwrap();
+    let client = Dht::server().await.unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let info = client.info();
+    let info = client.info().await;
 
     println!("{info:?}");
 
     let client = Dht::builder()
         .bootstrap(&[info.local_addr()])
         .build()
+        .await
         .unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let info = client.info();
+    let info = client.info().await;
 
     println!("Bootstrapped using local node. {info:?}");
 }

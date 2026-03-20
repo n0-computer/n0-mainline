@@ -13,7 +13,8 @@ struct Cli {
     secret_key: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -29,7 +30,7 @@ fn main() {
     // you can't or don't want to connect to by accident.
     let info_hash = Id::from_str(cli.infohash.as_str()).expect("invalid infohash");
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     let signer = from_hex(cli.secret_key);
 
@@ -40,16 +41,17 @@ fn main() {
     );
 
     println!("\n=== COLD QUERY ===");
-    announce(&dht, info_hash, &signer);
+    announce(&dht, info_hash, &signer).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    announce(&dht, info_hash, &signer);
+    announce(&dht, info_hash, &signer).await;
 }
 
-fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
+async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
     let start = Instant::now();
 
     dht.announce_signed_peer(info_hash, signer)
+        .await
         .expect("announce_peer failed");
 
     println!(

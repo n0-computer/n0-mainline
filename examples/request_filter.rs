@@ -13,7 +13,8 @@ impl RequestFilter for Filter {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -28,13 +29,16 @@ fn main() {
             ..Default::default()
         })
         .build()
+        .await
         .unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let info = client.info();
+    let info = client.info().await;
 
     println!("{:?}", info);
 
-    loop {}
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
 }

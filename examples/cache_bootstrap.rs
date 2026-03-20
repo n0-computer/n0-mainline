@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use dht::Dht;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -27,11 +28,11 @@ fn main() {
     // this way you don't rely on default bootstrap nodes.
     builder.extra_bootstrap(&cached_nodes);
 
-    let client = builder.build().unwrap();
+    let client = builder.build().await.unwrap();
 
-    client.bootstrapped();
+    client.bootstrapped().await;
 
-    let bootstrap = client.to_bootstrap();
+    let bootstrap = client.to_bootstrap().await;
 
     save(bootstrap)
 }

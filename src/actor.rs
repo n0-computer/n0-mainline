@@ -5,9 +5,10 @@ pub(crate) mod socket;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::time::Duration;
 
-use flume::Sender;
-use flume::{Receiver, TryRecvError};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 use tracing::{debug, info};
 
@@ -32,20 +33,20 @@ pub struct Actor {
     pub(crate) socket: KrpcSocket,
     core: Core,
 
-    put_senders: HashMap<Id, Vec<Sender<Result<Id, PutError>>>>,
+    put_senders: HashMap<Id, Vec<mpsc::UnboundedSender<Result<Id, PutError>>>>,
     get_senders: HashMap<Id, Vec<ResponseSender>>,
 }
 
 impl Actor {
     /// Create a new actor
-    pub fn new(config: config::Config) -> Result<Self, std::io::Error> {
+    pub async fn new(config: config::Config) -> Result<Self, std::io::Error> {
         let id = if let Some(ip) = config.public_ip {
             Id::from_ip(ip.into())
         } else {
             Id::random()
         };
 
-        let socket = KrpcSocket::new(&config)?;
+        let socket = KrpcSocket::new(&config).await?;
         let bootstrap = config
             .bootstrap
             .iter()
@@ -109,20 +110,6 @@ impl Actor {
     pub fn tick(&mut self) {
         self.periodic_node_maintaenance();
 
-        let new_query_response = self
-            .socket
-            .recv_from()
-            .and_then(|(message, from)| self.handle_incoming_message(message, from));
-
-        // Response for an ongoing GET query
-        if let Some((target, response)) = new_query_response {
-            if let Some(senders) = self.get_senders.get(&target) {
-                for sender in senders {
-                    send(sender, response.clone());
-                }
-            }
-        }
-
         let mut done_put_queries = self.check_done_put_queries();
 
         for (_, query) in self.core.iterative_queries.iter_mut() {
@@ -169,6 +156,20 @@ impl Actor {
         }
     }
 
+    /// Process an incoming message from the network.
+    pub fn process_message(&mut self, message: Message, from: SocketAddrV4) {
+        let new_query_response = self.handle_incoming_message(message, from);
+
+        // Response for an ongoing GET query
+        if let Some((target, response)) = new_query_response {
+            if let Some(senders) = self.get_senders.get(&target) {
+                for sender in senders {
+                    send(sender, response.clone());
+                }
+            }
+        }
+    }
+
     /// Store a value in the closest nodes, optionally trigger a lookup query if
     /// the cached closest_nodes aren't fresh enough.
     pub fn put(
@@ -193,18 +194,6 @@ impl Actor {
     }
 
     /// Send a message to closer and closer nodes until we can't find any more nodes.
-    ///
-    /// Queries take few seconds to fully traverse the network, once it is done, it will be removed from
-    /// self.iterative_queries. But until then, calling [Actor::get] multiple times, will just return the list
-    /// of responses seen so far.
-    ///
-    /// Effectively, we are caching responses and backing off the network for the duration it takes
-    /// to traverse it.
-    ///
-    /// - `request` [RequestTypeSpecific], except [RequestTypeSpecific::Ping] and
-    ///   [RequestTypeSpecific::Put] which will be ignored.
-    /// - `extra_nodes` option allows the query to visit specific nodes, that won't necessesarily be visited
-    ///   through the query otherwise.
     pub fn get(
         &mut self,
         request: GetRequestSpecific,
@@ -391,55 +380,70 @@ impl Actor {
     }
 }
 
-pub fn run(config: Config, receiver: Receiver<ActorMessage>) {
-    match Actor::new(config) {
+/// Async event loop for the actor.
+pub async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMessage>) {
+    match Actor::new(config).await {
         Ok(mut actor) => {
+            // Maintenance interval
+            let mut maintenance = tokio::time::interval(Duration::from_secs(1));
+            maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
             loop {
-                match receiver.try_recv() {
-                    Ok(actor_message) => match actor_message {
-                        ActorMessage::Check(sender) => {
-                            let _ = sender.send(Ok(()));
-                        }
-                        ActorMessage::Info(sender) => {
-                            let _ = sender.send(actor.info());
-                        }
-                        ActorMessage::Put(request, sender, extra_nodes) => {
-                            let target = *request.target();
+                // Flush any queued outgoing packets
+                actor.socket.flush().await;
 
-                            match actor.put(request, extra_nodes) {
-                                Ok(()) => {
-                                    let senders = actor.put_senders.entry(target).or_insert(vec![]);
+                tokio::select! {
+                    msg = receiver.recv() => {
+                        match msg {
+                            Some(actor_message) => match actor_message {
+                                ActorMessage::Check(sender) => {
+                                    let _ = sender.send(Ok(()));
+                                }
+                                ActorMessage::Info(sender) => {
+                                    let _ = sender.send(actor.info());
+                                }
+                                ActorMessage::Put(request, sender, extra_nodes) => {
+                                    let target = *request.target();
 
+                                    match actor.put(request, extra_nodes) {
+                                        Ok(()) => {
+                                            let senders = actor.put_senders.entry(target).or_insert(vec![]);
+                                            senders.push(sender);
+                                        }
+                                        Err(error) => {
+                                            let _ = sender.send(Err(error));
+                                        }
+                                    };
+                                }
+                                ActorMessage::Get(request, sender) => {
+                                    let target = request.target();
+
+                                    let responses = actor.get(request, None);
+                                    for response in responses {
+                                        send(&sender, response);
+                                    }
+
+                                    let senders = actor.get_senders.entry(target).or_insert(vec![]);
                                     senders.push(sender);
                                 }
-                                Err(error) => {
-                                    let _ = sender.send(Err(error));
+                                ActorMessage::ToBootstrap(sender) => {
+                                    let _ = sender.send(actor.to_bootstrap());
                                 }
-                            };
-                        }
-                        ActorMessage::Get(request, sender) => {
-                            let target = request.target();
-
-                            let responses = actor.get(request, None);
-                            for response in responses {
-                                send(&sender, response);
+                            },
+                            None => {
+                                // All senders dropped, shutdown.
+                                tracing::debug!("dht::Dht's actor task was shutdown after Drop.");
+                                break;
                             }
-
-                            let senders = actor.get_senders.entry(target).or_insert(vec![]);
-
-                            senders.push(sender);
                         }
-                        ActorMessage::ToBootstrap(sender) => {
-                            let _ = sender.send(actor.to_bootstrap());
-                        }
-                    },
-                    Err(TryRecvError::Disconnected) => {
-                        // Node was dropped, kill this thread.
-                        tracing::debug!("dht::Dht's actor thread was shutdown after Drop.");
-                        break;
                     }
-                    Err(TryRecvError::Empty) => {
-                        // No op
+                    packet = actor.socket.recv_from_async() => {
+                        if let Some((message, from)) = packet {
+                            actor.process_message(message, from);
+                        }
+                    }
+                    _ = maintenance.tick() => {
+                        // Periodic maintenance (routing table refresh, pings, etc.)
                     }
                 }
 
@@ -447,7 +451,7 @@ pub fn run(config: Config, receiver: Receiver<ActorMessage>) {
             }
         }
         Err(err) => {
-            if let Ok(ActorMessage::Check(sender)) = receiver.try_recv() {
+            if let Some(ActorMessage::Check(sender)) = receiver.recv().await {
                 let _ = sender.send(Err(err));
             }
         }
@@ -474,22 +478,22 @@ fn send(sender: &ResponseSender, response: Response) {
 
 #[derive(Debug)]
 pub(crate) enum ActorMessage {
-    Info(Sender<Info>),
+    Info(oneshot::Sender<Info>),
     Put(
         PutRequestSpecific,
-        Sender<Result<Id, PutError>>,
+        mpsc::UnboundedSender<Result<Id, PutError>>,
         Option<Box<[Node]>>,
     ),
     Get(GetRequestSpecific, ResponseSender),
-    Check(Sender<Result<(), std::io::Error>>),
-    ToBootstrap(Sender<Vec<String>>),
+    Check(oneshot::Sender<Result<(), std::io::Error>>),
+    ToBootstrap(oneshot::Sender<Vec<String>>),
 }
 
 #[derive(Debug, Clone)]
 pub enum ResponseSender {
-    ClosestNodes(Sender<Box<[Node]>>),
-    Peers(Sender<Vec<SocketAddrV4>>),
-    SignedPeers(Sender<Vec<SignedAnnounce>>),
-    Mutable(Sender<MutableItem>),
-    Immutable(Sender<Box<[u8]>>),
+    ClosestNodes(mpsc::UnboundedSender<Box<[Node]>>),
+    Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
+    SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
+    Mutable(mpsc::UnboundedSender<MutableItem>),
+    Immutable(mpsc::UnboundedSender<Box<[u8]>>),
 }

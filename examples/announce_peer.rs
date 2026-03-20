@@ -11,7 +11,8 @@ struct Cli {
     infohash: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -23,21 +24,22 @@ fn main() {
 
     let info_hash = Id::from_str(cli.infohash.as_str()).expect("invalid infohash");
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("\nAnnouncing peer on an infohash: {} ...\n", cli.infohash);
 
     println!("\n=== COLD QUERY ===");
-    announce(&dht, info_hash);
+    announce(&dht, info_hash).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    announce(&dht, info_hash);
+    announce(&dht, info_hash).await;
 }
 
-fn announce(dht: &Dht, info_hash: Id) {
+async fn announce(dht: &Dht, info_hash: Id) {
     let start = Instant::now();
 
     dht.announce_peer(info_hash, Some(6991))
+        .await
         .expect("announce_peer failed");
 
     println!(

@@ -2,11 +2,13 @@
 
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
-    thread,
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use ed25519_dalek::SigningKey;
-use flume::{Receiver, Sender};
+use futures_core::Stream;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     actor::{config::Config, ActorMessage, Info, ResponseSender},
@@ -20,18 +22,13 @@ use crate::{
     Node, ServerSettings,
 };
 
-#[cfg(feature = "async")]
-pub mod async_dht;
 mod testnet;
 
 pub use testnet::Testnet;
 
-#[cfg(feature = "async")]
-use async_dht::AsyncDht;
-
 #[derive(Debug, Clone)]
 /// Mainline Dht node.
-pub struct Dht(pub(crate) Sender<ActorMessage>);
+pub struct Dht(pub(crate) mpsc::UnboundedSender<ActorMessage>);
 
 #[derive(Debug, Default, Clone)]
 /// A builder for the [Dht] node.
@@ -106,14 +103,8 @@ impl DhtBuilder {
     }
 
     /// Create a [Dht] node.
-    pub fn build(&self) -> Result<Dht, std::io::Error> {
-        Dht::new(self.0.clone())
-    }
-
-    /// Create a [AsyncDht] node, without blocking on initial dns queries.
-    #[cfg(feature = "async")]
-    pub async fn build_async(&self) -> Result<AsyncDht, std::io::Error> {
-        AsyncDht::new(self.0.clone()).await
+    pub async fn build(&self) -> Result<Dht, std::io::Error> {
+        Dht::new(self.0.clone()).await
     }
 }
 
@@ -122,39 +113,21 @@ impl Dht {
     ///
     /// Could return an error if it failed to bind to the specified
     /// port or other io errors while binding the udp socket.
-    pub fn new(config: Config) -> Result<Self, std::io::Error> {
-        let (sender, rx) = Dht::setup(config)?;
-        rx.recv().expect("actor thread unexpectedly shutdown")?;
+    pub async fn new(config: Config) -> Result<Self, std::io::Error> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        let (check_tx, check_rx) = oneshot::channel();
+        sender
+            .send(ActorMessage::Check(check_tx))
+            .expect("receiver not dropped");
+
+        tokio::spawn(crate::actor::run(config, receiver));
+
+        check_rx
+            .await
+            .expect("actor task unexpectedly shutdown")?;
 
         Ok(Dht(sender))
-    }
-
-    /// Create a new [AsyncDht] node, without blocking on initial dns queries.
-    ///
-    /// Could return an error if it failed to bind to the specified
-    /// port or other io errors while binding the udp socket.
-    #[cfg(feature = "async")]
-    pub async fn new_async(config: Config) -> Result<AsyncDht, std::io::Error> {
-        AsyncDht::new(config).await
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn setup(
-        config: Config,
-    ) -> Result<(Sender<ActorMessage>, Receiver<Result<(), std::io::Error>>), std::io::Error> {
-        let (sender, receiver) = flume::unbounded();
-
-        thread::Builder::new()
-            .name("Mainline Dht actor thread".to_string())
-            .spawn(move || crate::actor::run(config, receiver))?;
-
-        let (tx, rx) = flume::bounded(1);
-
-        sender
-            .send(ActorMessage::Check(tx))
-            .expect("actor thread unexpectedly shutdown");
-
-        Ok((sender, rx))
     }
 
     /// Returns a builder to edit settings before creating a Dht node.
@@ -163,51 +136,44 @@ impl Dht {
     }
 
     /// Create a new DHT client with default bootstrap nodes.
-    pub fn client() -> Result<Self, std::io::Error> {
-        Dht::builder().build()
+    pub async fn client() -> Result<Self, std::io::Error> {
+        Dht::builder().build().await
     }
 
     /// Create a new DHT node that is running in [Server mode][DhtBuilder::server_mode] as
     /// soon as possible.
-    ///
-    /// You shouldn't use this option unless you are sure your
-    /// DHT node is publicly accessible (not firewalled) _AND_ will be long running,
-    /// and/or you are running your own local network for testing.
-    ///
-    /// If you are not sure, use [Self::client] and it will switch
-    /// to server mode when/if these two conditions are met.
-    pub fn server() -> Result<Self, std::io::Error> {
-        Dht::builder().server_mode().build()
+    pub async fn server() -> Result<Self, std::io::Error> {
+        Dht::builder().server_mode().build().await
     }
 
     // === Getters ===
 
     /// Information and statistics about this [Dht] node.
-    pub fn info(&self) -> Info {
-        let (tx, rx) = flume::bounded::<Info>(1);
+    pub async fn info(&self) -> Info {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Info(tx));
 
-        rx.recv().expect("actor thread unexpectedly shutdown")
+        rx.await.expect("actor task unexpectedly shutdown")
     }
 
-    /// Turn this node's routing table to a list of bootstrapping nodes.   
-    pub fn to_bootstrap(&self) -> Vec<String> {
-        let (tx, rx) = flume::bounded::<Vec<String>>(1);
+    /// Turn this node's routing table to a list of bootstrapping nodes.
+    pub async fn to_bootstrap(&self) -> Vec<String> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::ToBootstrap(tx));
 
-        rx.recv().expect("actor thread unexpectedly shutdown")
+        rx.await.expect("actor task unexpectedly shutdown")
     }
 
     // === Public Methods ===
 
-    /// Block until the bootstrapping query is done.
+    /// Await until the bootstrapping query is done.
     ///
     /// Returns true if the bootstrapping was successful.
-    pub fn bootstrapped(&self) -> bool {
-        let info = self.info();
-        self.find_node(*info.id());
+    pub async fn bootstrapped(&self) -> bool {
+        let info = self.info().await;
+        self.find_node(*info.id()).await;
 
-        let info = self.info();
+        let info = self.info().await;
         info.routing_table_size() > 0
     }
 
@@ -226,14 +192,14 @@ impl Dht {
     /// If you are trying to find the closest nodes to a target with intent to [Self::put],
     /// a request directly to these nodes (using `extra_nodes` parameter), then you should
     /// use [Self::get_closest_nodes] instead.
-    pub fn find_node(&self, target: Id) -> Box<[Node]> {
-        let (tx, rx) = flume::bounded::<Box<[Node]>>(1);
+    pub async fn find_node(&self, target: Id) -> Box<[Node]> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv()
+        rx.recv().await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -248,14 +214,14 @@ impl Dht {
     /// for Bittorrent is that any peer will introduce you to more peers through "peer exchange"
     /// so if you are implementing something different from Bittorrent, you might want
     /// to implement your own logic for gossipping more peers after you discover the first ones.
-    pub fn get_peers(&self, info_hash: Id) -> GetIterator<Vec<SocketAddrV4>> {
-        let (tx, rx) = flume::unbounded::<Vec<SocketAddrV4>>();
+    pub fn get_peers(&self, info_hash: Id) -> GetStream<Vec<SocketAddrV4>> {
+        let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::Peers(tx),
         ));
 
-        GetIterator(rx.into_iter())
+        GetStream(rx)
     }
 
     /// Announce a peer for a given infohash.
@@ -263,7 +229,7 @@ impl Dht {
     /// The peer will be announced on this process IP.
     /// If explicit port is passed, it will be used, otherwise the port will be implicitly
     /// assumed by remote nodes to be the same ase port they received the request from.
-    pub fn announce_peer(&self, info_hash: Id, port: Option<u16>) -> Result<Id, PutQueryError> {
+    pub async fn announce_peer(&self, info_hash: Id, port: Option<u16>) -> Result<Id, PutQueryError> {
         let (port, implied_port) = match port {
             Some(port) => (port, None),
             None => (0, Some(true)),
@@ -277,6 +243,7 @@ impl Dht {
             }),
             None,
         )
+        .await
         .map_err(|error| match error {
             PutError::Query(error) => error,
             PutError::Concurrency(_) => {
@@ -299,7 +266,7 @@ impl Dht {
     /// `info_hash` to this method.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    pub fn announce_signed_peer(
+    pub async fn announce_signed_peer(
         &self,
         info_hash: Id,
         signer: &SigningKey,
@@ -315,6 +282,7 @@ impl Dht {
             }),
             None,
         )
+        .await
         .map_err(|error| match error {
             PutError::Query(error) => error,
             PutError::Concurrency(_) => {
@@ -343,21 +311,21 @@ impl Dht {
     /// to implement your own logic for gossipping more peers after you discover the first ones.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    pub fn get_signed_peers(&self, info_hash: Id) -> GetIterator<Vec<SignedAnnounce>> {
-        let (tx, rx) = flume::unbounded::<Vec<SignedAnnounce>>();
+    pub fn get_signed_peers(&self, info_hash: Id) -> GetStream<Vec<SignedAnnounce>> {
+        let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetSignedPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::SignedPeers(tx),
         ));
 
-        GetIterator(rx.into_iter())
+        GetStream(rx)
     }
 
     // === Immutable data ===
 
     /// Get an Immutable data by its sha1 hash.
-    pub fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
-        let (tx, rx) = flume::unbounded::<Box<[u8]>>();
+    pub async fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -367,11 +335,11 @@ impl Dht {
             ResponseSender::Immutable(tx),
         ));
 
-        rx.recv().map(Some).unwrap_or(None)
+        rx.recv().await
     }
 
     /// Put an immutable data to the DHT.
-    pub fn put_immutable(&self, value: &[u8]) -> Result<Id, PutQueryError> {
+    pub async fn put_immutable(&self, value: &[u8]) -> Result<Id, PutQueryError> {
         let target: Id = hash_immutable(value).into();
 
         self.put(
@@ -381,6 +349,7 @@ impl Dht {
             }),
             None,
         )
+        .await
         .map_err(|error| match error {
             PutError::Query(error) => error,
             PutError::Concurrency(_) => {
@@ -398,7 +367,7 @@ impl Dht {
     ///
     /// # Order
     ///
-    /// The order of [MutableItem]s returned by this iterator is not guaranteed to
+    /// The order of [MutableItem]s returned by this stream is not guaranteed to
     /// reflect their `seq` value. You should not assume that the later items are
     /// more recent than earlier ones.
     ///
@@ -408,10 +377,10 @@ impl Dht {
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
         more_recent_than: Option<i64>,
-    ) -> GetIterator<MutableItem> {
+    ) -> GetStream<MutableItem> {
         let salt = salt.map(|s| s.into());
         let target = MutableItem::target_from_key(public_key, salt.as_deref());
-        let (tx, rx) = flume::unbounded::<MutableItem>();
+        let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -421,18 +390,19 @@ impl Dht {
             ResponseSender::Mutable(tx),
         ));
 
-        GetIterator(rx.into_iter())
+        GetStream(rx)
     }
 
     /// Get the most recent [MutableItem] from the network.
-    pub fn get_mutable_most_recent(
+    pub async fn get_mutable_most_recent(
         &self,
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
     ) -> Option<MutableItem> {
         let mut most_recent: Option<MutableItem> = None;
-        let iter = self.get_mutable(public_key, salt, None);
-        for item in iter {
+        let mut stream = self.get_mutable(public_key, salt, None);
+
+        while let Some(item) = stream.0.recv().await {
             if let Some(mr) = &most_recent {
                 if item.seq() == mr.seq && item.value() > &mr.value {
                     most_recent = Some(item)
@@ -456,35 +426,31 @@ impl Dht {
     /// To mitigate the risk of lost updates, you should call the [Self::get_mutable_most_recent] method
     /// then start authoring the new [MutableItem] based on the most recent as in the following example:
     ///
-    ///```rust
+    ///```rust,ignore
     /// use dht::{Dht, MutableItem, SigningKey, Testnet};
     ///
-    /// let testnet = Testnet::new(3).unwrap();
-    /// let dht = Dht::builder().bootstrap(&testnet.bootstrap).build().unwrap();
+    /// let testnet = Testnet::new(3).await.unwrap();
+    /// let dht = Dht::builder().bootstrap(&testnet.bootstrap).build().await.unwrap();
     ///
     /// let signing_key = SigningKey::from_bytes(&[0; 32]);
     /// let key = signing_key.verifying_key().to_bytes();
     /// let salt = Some(b"salt".as_ref());
     ///
-    /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt) {
-    ///     // 1. Optionally Create a new value to take the most recent's value in consideration.
+    /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt).await {
     ///     let mut new_value = most_recent.value().to_vec();
     ///     new_value.extend_from_slice(b" more data");
-    ///
-    ///     // 2. Increment the sequence number to be higher than the most recent's.
     ///     let most_recent_seq = most_recent.seq();
     ///     let new_seq = most_recent_seq + 1;
     ///
     ///     (
-    ///         MutableItem::new(signing_key, &new_value, new_seq, salt),
-    ///         // 3. Use the most recent [MutableItem::seq] as a `CAS`.
+    ///         MutableItem::new(&signing_key, &new_value, new_seq, salt),
     ///         Some(most_recent_seq)
     ///     )
     /// } else {
-    ///     (MutableItem::new(signing_key, b"first value", 1, salt), None)
+    ///     (MutableItem::new(&signing_key, b"first value", 1, salt), None)
     /// };
     ///
-    /// dht.put_mutable(item, cas).unwrap();
+    /// dht.put_mutable(item, cas).await.unwrap();
     /// ```
     ///
     /// ## Errors
@@ -495,10 +461,10 @@ impl Dht {
     ///
     /// If you are lucky to get one of these errors (which is not guaranteed), then you should
     /// read the most recent item again, and repeat the steps in the previous example.
-    pub fn put_mutable(&self, item: MutableItem, cas: Option<i64>) -> Result<Id, PutMutableError> {
+    pub async fn put_mutable(&self, item: MutableItem, cas: Option<i64>) -> Result<Id, PutMutableError> {
         let request = PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, cas));
 
-        self.put(request, None).map_err(|error| match error {
+        self.put(request, None).await.map_err(|error| match error {
             PutError::Query(err) => PutMutableError::Query(err),
             PutError::Concurrency(err) => PutMutableError::Concurrency(err),
         })
@@ -510,8 +476,8 @@ impl Dht {
     ///
     /// Useful to [Self::put] a request to nodes further from the 20 closest nodes to the
     /// [PutRequestSpecific::target]. Which itself is useful to circumvent [extreme vertical sybil attacks](https://github.com/nuhvi/mainline/blob/main/docs/censorship-resistance.md#extreme-vertical-sybil-attacks).
-    pub fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
-        let (tx, rx) = flume::unbounded::<Box<[Node]>>();
+    pub async fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -521,7 +487,7 @@ impl Dht {
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv()
+        rx.recv().await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -534,56 +500,70 @@ impl Dht {
     /// [Self::get_closest_nodes] with the target that you want to find the closest nodes to.
     ///
     /// Note: extra nodes need to have [Node::valid_token].
-    pub fn put(
+    pub async fn put(
         &self,
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
     ) -> Result<Id, PutError> {
-        self.put_inner(request, extra_nodes)
-            .recv()
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        self.send(ActorMessage::Put(request, tx, extra_nodes));
+
+        rx.recv().await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
     // === Private Methods ===
 
-    pub(crate) fn put_inner(
-        &self,
-        request: PutRequestSpecific,
-        extra_nodes: Option<Box<[Node]>>,
-    ) -> flume::Receiver<Result<Id, PutError>> {
-        let (tx, rx) = flume::bounded::<Result<Id, PutError>>(1);
-        self.send(ActorMessage::Put(request, tx, extra_nodes));
-
-        rx
-    }
-
     pub(crate) fn send(&self, message: ActorMessage) {
         self.0
             .send(message)
-            .expect("actor thrread unexpectedly shutdown");
+            .expect("actor task unexpectedly shutdown");
     }
 }
 
-pub struct GetIterator<T>(flume::IntoIter<T>);
+/// A [Stream] of incoming peers, immutable or mutable values.
+pub struct GetStream<T>(mpsc::UnboundedReceiver<T>);
 
-impl<T> Iterator for GetIterator<T> {
+impl<T> Stream for GetStream<T> {
     type Item = T;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        this.0.poll_recv(cx)
     }
 }
 
-#[derive(thiserror::Error, Debug)]
 /// Put MutableItem errors.
+#[derive(Debug)]
 pub enum PutMutableError {
-    #[error(transparent)]
     /// Common PutQuery errors
-    Query(#[from] PutQueryError),
+    Query(PutQueryError),
 
-    #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
-    Concurrency(#[from] ConcurrencyError),
+    Concurrency(ConcurrencyError),
+}
+
+impl std::fmt::Display for PutMutableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query(e) => write!(f, "{e}"),
+            Self::Concurrency(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for PutMutableError {}
+
+impl From<PutQueryError> for PutMutableError {
+    fn from(e: PutQueryError) -> Self {
+        Self::Query(e)
+    }
+}
+
+impl From<ConcurrencyError> for PutMutableError {
+    fn from(e: ConcurrencyError) -> Self {
+        Self::Concurrency(e)
+    }
 }
 
 #[cfg(test)]
@@ -591,94 +571,103 @@ mod test {
     use std::{str::FromStr, time::Duration};
 
     use ed25519_dalek::SigningKey;
+    use futures::StreamExt;
 
-    use crate::{actor::ActorMessage, core::ConcurrencyError};
+    use crate::core::ConcurrencyError;
 
     use super::*;
 
-    #[test]
-    fn bind_twice() {
-        let a = Dht::client().unwrap();
+    #[tokio::test]
+    async fn bind_twice() {
+        let a = Dht::client().await.unwrap();
         let result = Dht::builder()
-            .port(a.info().local_addr().port())
+            .port(a.info().await.local_addr().port())
             .server_mode()
-            .build();
+            .build()
+            .await;
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn announce_get_peer() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn announce_get_peer() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let info_hash = Id::random();
 
         a.announce_peer(info_hash, Some(45555))
+            .await
             .expect("failed to announce");
 
-        let peers = b.get_peers(info_hash).next().expect("No peers");
+        let peers = b.get_peers(info_hash).next().await.expect("No peers");
 
         assert_eq!(peers.first().unwrap().port(), 45555);
     }
 
-    #[test]
-    fn put_get_immutable() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn put_get_immutable() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let value = b"Hello World!";
         let expected_target = Id::from_str("e5f96f6f38320f0f33959cb4d3d656452117aadb").unwrap();
 
-        let target = a.put_immutable(value).unwrap();
+        let target = a.put_immutable(value).await.unwrap();
         assert_eq!(target, expected_target);
 
-        let response = b.get_immutable(target).unwrap();
+        let response = b.get_immutable(target).await.unwrap();
 
         assert_eq!(response, value.to_vec().into_boxed_slice());
     }
 
-    #[test]
-    fn find_node_no_values() {
-        let client = Dht::builder().no_bootstrap().build().unwrap();
+    #[tokio::test]
+    async fn find_node_no_values() {
+        let client = Dht::builder().no_bootstrap().build().await.unwrap();
 
-        client.find_node(Id::random());
+        client.find_node(Id::random()).await;
     }
 
-    #[test]
-    fn put_get_immutable_no_values() {
-        let client = Dht::builder().no_bootstrap().build().unwrap();
+    #[tokio::test]
+    async fn put_get_immutable_no_values() {
+        let client = Dht::builder().no_bootstrap().build().await.unwrap();
 
-        assert_eq!(client.get_immutable(Id::random()), None);
+        assert_eq!(client.get_immutable(Id::random()).await, None);
     }
 
-    #[test]
-    fn put_get_mutable() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn put_get_mutable() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -691,27 +680,30 @@ mod test {
 
         let item = MutableItem::new(&signer, value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         assert_eq!(&response, &item);
     }
 
-    #[test]
-    fn put_get_mutable_no_more_recent_value() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn put_get_mutable_no_more_recent_value() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -724,40 +716,44 @@ mod test {
 
         let item = MutableItem::new(&signer, value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
-            .next();
+            .next()
+            .await;
 
         assert!(&response.is_none());
     }
 
-    #[test]
-    fn repeated_put_query() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn repeated_put_query() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
-        let id = a.put_immutable(&[1, 2, 3]).unwrap();
+        let id = a.put_immutable(&[1, 2, 3]).await.unwrap();
 
-        assert_eq!(a.put_immutable(&[1, 2, 3]).unwrap(), id);
+        assert_eq!(a.put_immutable(&[1, 2, 3]).await.unwrap(), id);
     }
 
-    #[test]
-    fn concurrent_get_mutable() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn concurrent_get_mutable() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -771,109 +767,31 @@ mod test {
 
         let item = MutableItem::new(&signer, value, seq, None);
 
-        a.put_mutable(item.clone(), None).unwrap();
+        a.put_mutable(item.clone(), None).await.unwrap();
 
         let _response_first = b
             .get_mutable(&key, None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         let response_second = b
             .get_mutable(&key, None, None)
             .next()
+            .await
             .expect("No mutable values");
 
         assert_eq!(&response_second, &item);
     }
 
-    #[test]
-    fn concurrent_put_mutable_same() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn concurrent_put_mutable_different_with_cas() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let client = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
-            .unwrap();
-
-        let signer = SigningKey::from_bytes(&[
-            56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
-            228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
-        ]);
-
-        let seq = 1000;
-        let value = b"Hello World!";
-
-        let item = MutableItem::new(&signer, value, seq, None);
-
-        let mut handles = vec![];
-
-        for _ in 0..2 {
-            let client = client.clone();
-            let item = item.clone();
-
-            let handle = std::thread::spawn(move || client.put_mutable(item, None).unwrap());
-
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn concurrent_put_mutable_different() {
-        let testnet = Testnet::new(10).unwrap();
-
-        let client = Dht::builder()
-            .bootstrap(&testnet.bootstrap)
-            .build()
-            .unwrap();
-
-        let mut handles = vec![];
-
-        for i in 0..2 {
-            let client = client.clone();
-
-            let signer = SigningKey::from_bytes(&[
-                56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
-                228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
-            ]);
-
-            let seq = 1000;
-
-            let mut value = b"Hello World!".to_vec();
-            value.push(i);
-
-            let item = MutableItem::new(&signer, &value, seq, None);
-
-            let handle = std::thread::spawn(move || {
-                let result = client.put_mutable(item, None);
-                if i == 0 {
-                    assert!(result.is_ok())
-                } else {
-                    assert!(matches!(
-                        result,
-                        Err(PutMutableError::Concurrency(ConcurrencyError::ConflictRisk))
-                    ))
-                }
-            });
-
-            handles.push(handle);
-        }
-
-        for handle in handles {
-            handle.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn concurrent_put_mutable_different_with_cas() {
-        let testnet = Testnet::new(10).unwrap();
-
-        let client = Dht::builder()
-            .bootstrap(&testnet.bootstrap)
-            .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -885,38 +803,39 @@ mod test {
         {
             let item = MutableItem::new(&signer, &[], 1000, None);
 
-            let (sender, _) = flume::bounded::<Result<Id, PutError>>(1);
+            let (tx, _rx) = mpsc::unbounded_channel();
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
             client
                 .0
-                .send(ActorMessage::Put(request, sender, None))
+                .send(ActorMessage::Put(request, tx, None))
                 .unwrap();
         }
 
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Second
         {
             let item = MutableItem::new(&signer, &[], 1001, None);
 
-            let most_recent = client.get_mutable_most_recent(item.key(), None);
+            let most_recent = client.get_mutable_most_recent(item.key(), None).await;
 
             if let Some(cas) = most_recent.map(|item| item.seq()) {
-                client.put_mutable(item, Some(cas)).unwrap();
+                client.put_mutable(item, Some(cas)).await.unwrap();
             } else {
-                client.put_mutable(item, None).unwrap();
+                client.put_mutable(item, None).await.unwrap();
             }
         }
     }
 
-    #[test]
-    fn conflict_302_seq_less_than_current() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn conflict_302_seq_less_than_current() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let client = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -926,23 +845,25 @@ mod test {
 
         client
             .put_mutable(MutableItem::new(&signer, &[], 1001, None), None)
+            .await
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(&signer, &[], 1000, None), None),
+            client.put_mutable(MutableItem::new(&signer, &[], 1000, None), None).await,
             Err(PutMutableError::Concurrency(
                 ConcurrencyError::NotMostRecent
             ))
         ));
     }
 
-    #[test]
-    fn conflict_301_cas() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn conflict_301_cas() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let client = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let signer = SigningKey::from_bytes(&[
@@ -952,49 +873,52 @@ mod test {
 
         client
             .put_mutable(MutableItem::new(&signer, &[], 1001, None), None)
+            .await
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(&signer, &[], 1002, None), Some(1000)),
+            client.put_mutable(MutableItem::new(&signer, &[], 1002, None), Some(1000)).await,
             Err(PutMutableError::Concurrency(ConcurrencyError::CasFailed))
         ));
     }
 
-    #[test]
-    fn populate_bootstrapping_node_routing_table() {
+    #[tokio::test]
+    async fn populate_bootstrapping_node_routing_table() {
         let size = 3;
 
-        let testnet = Testnet::new(size).unwrap();
+        let testnet = Testnet::new(size).await.unwrap();
 
-        assert!(testnet
-            .nodes
-            .iter()
-            .all(|n| n.to_bootstrap().len() == size - 1));
+        for n in &testnet.nodes {
+            assert_eq!(n.to_bootstrap().await.len(), size - 1);
+        }
     }
 
-    #[test]
-    fn bootstrap_with_one_node() {
-        let testnet = Testnet::new(1).unwrap();
+    #[tokio::test]
+    async fn bootstrap_with_one_node() {
+        let testnet = Testnet::new(1).await.unwrap();
 
         let client = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
-        assert!(client.bootstrapped());
+        assert!(client.bootstrapped().await);
     }
 
-    #[test]
-    fn announce_signed_peers_at_full_adoption() {
-        let testnet = Testnet::new(10).unwrap();
+    #[tokio::test]
+    async fn announce_signed_peers_at_full_adoption() {
+        let testnet = Testnet::new(10).await.unwrap();
 
         let a = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
         let b = Dht::builder()
             .bootstrap(&testnet.bootstrap)
             .build()
+            .await
             .unwrap();
 
         let info_hash = Id::random();
@@ -1016,10 +940,11 @@ mod test {
 
         for signer in signers {
             a.announce_signed_peer(info_hash, &signer)
+                .await
                 .expect("failed to announce");
         }
 
-        let peers = b.get_signed_peers(info_hash).next().expect("No peers");
+        let peers = b.get_signed_peers(info_hash).next().await.expect("No peers");
 
         let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
         keys.sort();
@@ -1027,9 +952,9 @@ mod test {
         assert_eq!(keys, expected_keys);
     }
 
-    #[test]
-    fn announce_signed_peers_at_low_adoption() {
-        let testnet_legacy = Testnet::new_without_signed_peers(10).unwrap();
+    #[tokio::test]
+    async fn announce_signed_peers_at_low_adoption() {
+        let testnet_legacy = Testnet::new_without_signed_peers(10).await.unwrap();
 
         let signers = [0, 1, 2]
             .iter()
@@ -1054,29 +979,27 @@ mod test {
                 .bootstrap(&testnet_legacy.bootstrap)
                 .disable_signed_peers()
                 .build()
+                .await
                 .unwrap();
-            assert!(a.announce_signed_peer(info_hash, &signers[0]).is_err());
-            assert_eq!(a.get_signed_peers(info_hash).next(), None)
+            assert!(a.announce_signed_peer(info_hash, &signers[0]).await.is_err());
+            assert_eq!(a.get_signed_peers(info_hash).next().await, None)
         }
 
         {
-            // Without a separate table internally, this new bootstrapping node,
-            // will tell `a` and `b` that there are closer nodes than itself
-            // to the info_hash they request, while these "closer" nodes don't
-            // support these queries at all, thus, a separate table is necessary.
-            let testnet_new = Testnet::new_with_bootstrap(3, &testnet_legacy.bootstrap).unwrap();
+            let testnet_new = Testnet::new_with_bootstrap(3, &testnet_legacy.bootstrap).await.unwrap();
 
             let bootstrap = testnet_new.bootstrap;
 
-            let a = Dht::builder().bootstrap(&bootstrap).build().unwrap();
-            let b = Dht::builder().bootstrap(&bootstrap).build().unwrap();
+            let a = Dht::builder().bootstrap(&bootstrap).build().await.unwrap();
+            let b = Dht::builder().bootstrap(&bootstrap).build().await.unwrap();
 
             for signer in &signers {
                 a.announce_signed_peer(info_hash, signer)
+                    .await
                     .expect("failed to announce");
             }
 
-            let peers = b.get_signed_peers(info_hash).next().expect("No peers");
+            let peers = b.get_signed_peers(info_hash).next().await.expect("No peers");
 
             let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
             keys.sort();

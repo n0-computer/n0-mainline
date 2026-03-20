@@ -19,10 +19,10 @@ Check the [Examples](https://github.com/nuhvi/mainline/tree/main/examples).
 
 Running as a client, means you can store and query for values on the DHT, but not accept any incoming requests.
 
-```rust
+```rust,ignore
 use dht::Dht;
 
-let dht = Dht::client().unwrap();
+let dht = Dht::client().await.unwrap();
 ```
 
 Supported BEPs:
@@ -38,10 +38,10 @@ This implementation also includes [measures against Vertical Sybil Attacks](http
 
 Running as a server is the same as a client, but you also respond to incoming requests and serve as a routing and storing node, supporting the general routing of the DHT, and contributing to the storage capacity of the DHT.
 
-```rust
+```rust,ignore
 use dht::Dht;
 
-let dht = Dht::server().unwrap(); // or `Dht::builder::server_mode().build();` 
+let dht = Dht::server().await.unwrap(); // or `Dht::builder::server_mode().build().await;`
 ```
 
 Supported BEPs:
