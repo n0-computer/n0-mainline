@@ -1,6 +1,8 @@
-# Mainline
+# iroh-mainline
 
 Simple, robust, BitTorrent's [Mainline DHT](https://en.wikipedia.org/wiki/Mainline_DHT) implementation.
+
+This is an iroh-flavored fork of [mainline](https://crates.io/crates/mainline): it is a support crate for [iroh](https://github.com/n0-computer/iroh) and integrates with the iroh ecosystem (e.g. [`iroh-base`](https://crates.io/crates/iroh-base) keys, async UDP via [`noq-udp`](https://crates.io/crates/noq-udp)). It does **not** depend on the `iroh` crate itself, so it can be used standalone. It does require `noq-udp` for its socket layer.
 
 This library is focused on being the best and simplest Rust client for Mainline, especially focused on reliable and fast time-to-first-response.
 
