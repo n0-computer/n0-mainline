@@ -567,6 +567,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "hits the real mainline DHT; run with --ignored"]
     async fn put_get_mutable_real_dht() {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("debug")
