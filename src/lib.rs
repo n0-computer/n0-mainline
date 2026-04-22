@@ -1,7 +1,4 @@
 #![doc = include_str!("../README.md")]
-//! ## Feature flags
-#![doc = document_features::document_features!()]
-//!
 
 #![deny(missing_docs, unused_must_use)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -22,17 +19,14 @@ mod common;
 mod core;
 mod dht;
 
-#[cfg(feature = "async")]
-pub use dht::async_dht;
-
 pub use common::{
     messages::{MessageType, PutRequestSpecific, RequestSpecific},
     ClosestNodes, Id, MutableItem, Node, RoutingTable,
 };
 pub use core::server::{RequestFilter, ServerSettings, MAX_INFO_HASHES, MAX_PEERS, MAX_VALUES};
-pub use dht::{Dht, DhtBuilder, Testnet};
+pub use dht::{Dht, DhtBuilder, GetStream, Testnet};
 
-pub use ed25519_dalek::SigningKey;
+pub use iroh_base::SecretKey;
 
 pub mod errors {
     //! Exported errors

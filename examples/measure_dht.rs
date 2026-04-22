@@ -1,6 +1,7 @@
 use dht::{Dht, Id};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -8,14 +9,14 @@ fn main() {
         )
         .init();
 
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("Calculating Dht size by sampling random lookup queries..",);
 
     for lookups in 1.. {
-        let _ = dht.find_node(Id::random());
+        let _ = dht.find_node(Id::random()).await;
 
-        let info = dht.info();
+        let info = dht.info().await;
         let (estimate, std_dev) = info.dht_size_estimate();
 
         println!(

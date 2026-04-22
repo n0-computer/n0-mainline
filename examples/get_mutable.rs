@@ -3,6 +3,7 @@ use std::convert::TryFrom;
 
 use std::time::Instant;
 
+use futures::StreamExt;
 use dht::{Dht, MutableItem};
 
 use clap::Parser;
@@ -14,7 +15,8 @@ struct Cli {
     public_key: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -25,21 +27,21 @@ fn main() {
     let cli = Cli::parse();
 
     let public_key = from_hex(cli.public_key.clone()).to_bytes();
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
     println!("Looking up mutable item: {} ...", cli.public_key);
 
     println!("\n=== COLD LOOKUP ===");
-    get_first(&dht, &public_key);
+    get_first(&dht, &public_key).await;
 
     println!("\n=== SUBSEQUENT LOOKUP ===");
-    get_first(&dht, &public_key);
+    get_first(&dht, &public_key).await;
 
     println!("\n=== GET MOST RECENT ===");
     let start = Instant::now();
 
     println!("\nLooking up the most recent value..");
-    let item = dht.get_mutable_most_recent(&public_key, None);
+    let item = dht.get_mutable_most_recent(&public_key, None).await;
 
     if let Some(item) = item {
         println!("Found the most recent value:");
@@ -54,9 +56,9 @@ fn main() {
     );
 }
 
-fn get_first(dht: &Dht, public_key: &[u8; 32]) {
+async fn get_first(dht: &Dht, public_key: &[u8; 32]) {
     let start = Instant::now();
-    if let Some(item) = dht.get_mutable(public_key, None, None).next() {
+    if let Some(item) = dht.get_mutable(public_key, None, None).next().await {
         println!(
             "\nGot first result in {:?} milliseconds:",
             start.elapsed().as_millis()

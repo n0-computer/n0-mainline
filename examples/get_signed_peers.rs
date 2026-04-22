@@ -4,6 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use futures::StreamExt;
 use dht::{Dht, Id};
 
 use clap::Parser;
@@ -15,7 +16,8 @@ struct Cli {
     infohash: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -27,27 +29,27 @@ fn main() {
 
     let info_hash = Id::from_str(cli.infohash.as_str()).expect("Expected info_hash");
 
-    // let dht = Dht::client().unwrap();
-    let dht = Dht::client().unwrap();
+    let dht = Dht::client().await.unwrap();
 
-    dht.bootstrapped();
+    dht.bootstrapped().await;
 
     println!("Looking up peers for info_hash: {} ...", info_hash);
     println!("\n=== COLD QUERY ===");
-    get_peers(&dht, &info_hash);
+    get_peers(&dht, &info_hash).await;
 
     println!("\n=== SUBSEQUENT QUERY ===");
     println!("Looking up peers for info_hash: {} ...", info_hash);
-    get_peers(&dht, &info_hash);
+    get_peers(&dht, &info_hash).await;
 }
 
-fn get_peers(dht: &Dht, info_hash: &Id) {
+async fn get_peers(dht: &Dht, info_hash: &Id) {
     let start = Instant::now();
     let mut first = false;
 
     let mut peers = HashSet::new();
 
-    for response in dht.get_signed_peers(*info_hash) {
+    let mut stream = dht.get_signed_peers(*info_hash);
+    while let Some(response) = stream.next().await {
         if !first {
             first = true;
             println!(
@@ -82,16 +84,12 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn time_ago(timestamp_micros: u64) -> String {
-    // Get current time in microseconds since UNIX epoch
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_micros() as u64;
 
-    // Calculate difference in microseconds
     let diff_micros = now.saturating_sub(timestamp_micros);
-
-    // Convert to seconds
     let seconds = diff_micros / 1_000_000;
 
     match seconds {
@@ -117,11 +115,11 @@ fn time_ago(timestamp_micros: u64) -> String {
             format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
         }
         2592000..=31535999 => {
-            let months = seconds / 2592000; // ~30 days
+            let months = seconds / 2592000;
             format!("{} month{} ago", months, if months == 1 { "" } else { "s" })
         }
         _ => {
-            let years = seconds / 31536000; // ~365 days
+            let years = seconds / 31536000;
             format!("{} year{} ago", years, if years == 1 { "" } else { "s" })
         }
     }

@@ -28,7 +28,6 @@
 //! 66 .. 75 [  0 ]:
 //! 75 .. 84 [  1 ]: ∎
 //! 84 .. 93 [ 15 ]: ∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
-//!
 
 use dht::{Dht, Id, Node};
 use histo::Histogram;
@@ -42,7 +41,8 @@ const K: usize = 20; // Not really k but we take the k closest nodes into accoun
 const MAX_DISTANCE: u8 = 150; // Health check to not include outrageously distant nodes.
 const USE_RANDOM_BOOTSTRAP_NODES: bool = false;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -69,8 +69,8 @@ fn main() {
     let mut lookup_count = 0;
     while rx_interrupted.try_recv().is_err() {
         lookup_count += 1;
-        let dht = init_dht(USE_RANDOM_BOOTSTRAP_NODES);
-        let nodes = dht.find_node(target);
+        let dht = init_dht(USE_RANDOM_BOOTSTRAP_NODES).await;
+        let nodes = dht.find_node(target).await;
         let nodes: Box<[Node]> = nodes
             .iter()
             .filter(|node| target.distance(node.id()) < MAX_DISTANCE)
@@ -85,10 +85,10 @@ fn main() {
             let previous = ip_hits.get(socket);
             match previous {
                 Some(val) => {
-                    ip_hits.insert(socket.clone(), val + 1);
+                    ip_hits.insert(*socket, val + 1);
                 }
                 None => {
-                    ip_hits.insert(socket.clone(), 1);
+                    ip_hits.insert(*socket, 1);
                 }
             };
         }
@@ -102,7 +102,7 @@ fn main() {
         let furthest_distance = target.distance(furthest_node.id());
 
         let overlap_with_last_lookup: HashSet<Ipv4Addr> =
-            sockets.intersection(&last_nodes).map(|ip| *ip).collect();
+            sockets.intersection(&last_nodes).copied().collect();
 
         let overlap = overlap_with_last_lookup.len() as f64 / K as f64;
         last_nodes = sockets;
@@ -122,9 +122,6 @@ fn main() {
 }
 
 fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
-    /*
-
-    */
     let mut histogram = Histogram::with_buckets(10);
     let percents: HashMap<Ipv4Addr, u64> = hits
         .into_iter()
@@ -135,28 +132,28 @@ fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
         .collect();
 
     for (_, percent) in percents.iter() {
-        histogram.add(percent.clone());
+        histogram.add(*percent);
     }
 
     println!("{}", histogram);
 }
 
-fn get_random_boostrap_nodes2() -> Vec<String> {
-    let dht = Dht::client().unwrap();
-    let nodes = dht.find_node(Id::random());
+async fn get_random_boostrap_nodes2() -> Vec<String> {
+    let dht = Dht::client().await.unwrap();
+    let nodes = dht.find_node(Id::random()).await;
     let addrs = nodes
         .iter()
         .map(|node| node.address().to_string())
         .collect::<Box<[_]>>();
-    let slice: Vec<String> = addrs[..8].into_iter().map(|va| va.clone()).collect();
+    let slice: Vec<String> = addrs[..8].iter().map(|va| va.clone()).collect();
     slice
 }
 
-fn init_dht(use_random_boostrap_nodes: bool) -> Dht {
+async fn init_dht(use_random_boostrap_nodes: bool) -> Dht {
     if use_random_boostrap_nodes {
-        let bootstrap = get_random_boostrap_nodes2();
-        return Dht::builder().bootstrap(&bootstrap).build().unwrap();
+        let bootstrap = get_random_boostrap_nodes2().await;
+        Dht::builder().bootstrap(&bootstrap).build().await.unwrap()
     } else {
-        Dht::client().unwrap()
+        Dht::client().await.unwrap()
     }
 }

@@ -221,19 +221,19 @@ impl std::fmt::Display for InvalidIdSize {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum DecodeIdError {
     /// Id is expected to by 20 bytes.
     #[error(transparent)]
-    InvalidIdSize(#[from] InvalidIdSize),
+    InvalidIdSize(InvalidIdSize),
 
     #[error("Hex encoding should contain an even number of hex characters")]
     /// Hex encoding should contain an even number of hex characters
     OddNumberOfCharacters,
 
     /// Invalid hex character
-    #[error("Invalid Id encoding: {0}")]
+    #[error("Invalid Id encoding")]
     InvalidHexCharacter(String),
 }
 

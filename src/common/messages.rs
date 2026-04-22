@@ -891,37 +891,47 @@ fn signed_peer_to_bytes(peer: &([u8; 32], u64, [u8; 64])) -> [u8; 104] {
     bytes
 }
 
-#[derive(thiserror::Error, Debug)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum DecodeMessageError {
     #[error("Expected message to be longer than 15 characters")]
+    /// Expected message to be longer than 15 characters
     TooShort,
 
     #[error("Expected message to start with 'd'")]
+    /// Expected message to start with 'd'
     NotBencodeDictionary,
 
     #[error("Wrong number of bytes for nodes")]
+    /// Wrong number of bytes for nodes
     InvalidNodes4,
 
     #[error("wrong number of bytes for port")]
+    /// wrong number of bytes for port
     InvalidPortEncoding,
 
     #[error("IPv6 is not yet implemented")]
+    /// IPv6 is not yet implemented
     Ipv6Unsupported,
 
     #[error("Wrong number of bytes for sockaddr")]
+    /// Wrong number of bytes for sockaddr
     InvalidSocketAddrEncodingLength,
 
-    #[error("Failed to parse packet bytes: {0}")]
-    BencodeError(#[from] serde_bencode::Error),
+    #[error(transparent)]
+    /// Failed to parse packet bytes
+    BencodeError(serde_bencode::Error),
 
     #[error(transparent)]
-    InvalidIdSize(#[from] InvalidIdSize),
+    /// Invalid Id size
+    InvalidIdSize(InvalidIdSize),
 
-    #[error("Invalid transaction id size (expected [u8;2] or [u8;4])")]
+    #[error("Invalid transaction id size (expected `[u8;2]` or `[u8;4]`)")]
+    /// Invalid transaction id size (expected `[u8;2]` or `[u8;4]`)
     InvalidTransactionIdSize,
 
     #[error("Wrong number of bytes for signed peers")]
+    /// Wrong number of bytes for signed peers
     InvalidSignedPeersEncodingLength,
 }
 

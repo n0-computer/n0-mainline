@@ -16,56 +16,43 @@ impl Testnet {
     /// gets dropped, if you want the network to be `'static`, then
     /// you should call [Self::leak].
     ///
-    /// This will block until all nodes are [bootstrapped][Dht::bootstrapped],
-    /// if you are using an async runtime, consider using [Self::new_async].
-    pub fn new(count: usize) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, false, None)?;
+    /// This will await until all nodes are [bootstrapped][Dht::bootstrapped].
+    pub async fn new(count: usize) -> Result<Testnet, std::io::Error> {
+        let testnet = Testnet::new_inner(count, false, None).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped();
-        }
-
-        Ok(testnet)
-    }
-
-    /// Similar to [Self::new] but awaits all nodes to bootstrap instead of blocking.
-    #[cfg(feature = "async")]
-    pub async fn new_async(count: usize) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, false, None)?;
-
-        for node in testnet.nodes.clone() {
-            node.as_async().bootstrapped().await;
+            node.bootstrapped().await;
         }
 
         Ok(testnet)
     }
 
     #[cfg(test)]
-    pub(crate) fn new_without_signed_peers(count: usize) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, true, None)?;
+    pub(crate) async fn new_without_signed_peers(count: usize) -> Result<Testnet, std::io::Error> {
+        let testnet = Testnet::new_inner(count, true, None).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped();
+            node.bootstrapped().await;
         }
 
         Ok(testnet)
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_bootstrap(
+    pub(crate) async fn new_with_bootstrap(
         count: usize,
         bootstrap: &[String],
     ) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, false, Some(bootstrap.to_vec()))?;
+        let testnet = Testnet::new_inner(count, false, Some(bootstrap.to_vec())).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped();
+            node.bootstrapped().await;
         }
 
         Ok(testnet)
     }
 
-    fn new_inner(
+    async fn new_inner(
         count: usize,
         disable_signed_peers: bool,
         bootstrap: Option<Vec<String>>,
@@ -81,10 +68,10 @@ impl Testnet {
                 builder.disable_signed_peers();
             }
 
-            let node = builder.server_mode().bootstrap(&bootstrap).build()?;
+            let node = builder.server_mode().bootstrap(&bootstrap).build().await?;
 
             if i == 0 {
-                let info = node.info();
+                let info = node.info().await;
                 let addr = info.local_addr();
 
                 bootstrap.push(format!("127.0.0.1:{}", addr.port()));

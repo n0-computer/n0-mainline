@@ -197,19 +197,21 @@ impl PutQuery {
     }
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[n0_error::stack_error(derive, from_sources, std_sources)]
+#[derive(Clone)]
 /// PutQuery errors
 pub enum PutError {
     /// Common PutQuery errors
     #[error(transparent)]
-    Query(#[from] PutQueryError),
+    Query(PutQueryError),
 
     #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
-    Concurrency(#[from] ConcurrencyError),
+    Concurrency(ConcurrencyError),
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[n0_error::stack_error(derive, std_sources)]
+#[derive(Clone)]
 /// Common PutQuery errors
 pub enum PutQueryError {
     /// Failed to find any nodes close, usually means dht node failed to bootstrap,
@@ -230,7 +232,8 @@ pub enum PutQueryError {
     Timeout,
 }
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[n0_error::stack_error(derive, std_sources)]
+#[derive(Clone)]
 /// PutQuery for [crate::MutableItem] errors
 pub enum ConcurrencyError {
     /// Trying to PUT mutable items with the same `key`, and `salt` but different `seq`.
