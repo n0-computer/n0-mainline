@@ -1,4 +1,4 @@
-use dht::Dht;
+use iroh_mainline::Dht;
 
 #[tokio::main]
 async fn main() {

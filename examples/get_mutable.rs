@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::time::Instant;
 
 use futures::StreamExt;
-use dht::{Dht, MutableItem};
+use iroh_mainline::{Dht, MutableItem};
 
 use clap::Parser;
 
@@ -81,7 +81,7 @@ fn print_value(item: &MutableItem) {
 }
 
 fn from_hex(s: String) -> VerifyingKey {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         panic!("Number of Hex characters should be even");
     }
 

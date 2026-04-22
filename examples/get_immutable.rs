@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Instant};
 
-use dht::{Dht, Id};
+use iroh_mainline::{Dht, Id};
 
 use clap::Parser;
 

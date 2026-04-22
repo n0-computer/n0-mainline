@@ -1,6 +1,6 @@
 use std::net::SocketAddrV4;
 
-use dht::{Dht, RequestFilter, RequestSpecific, ServerSettings};
+use iroh_mainline::{Dht, RequestFilter, RequestSpecific, ServerSettings};
 
 #[derive(Debug, Default, Clone)]
 struct Filter;

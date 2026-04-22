@@ -1,5 +1,5 @@
 [package]
-name = "dht"
+name = "iroh-mainline"
 version = "6.4.0"
 authors = ["nuh.dev"]
 edition = "2021"
@@ -18,8 +18,8 @@ serde = { version = "1.0.217", features = ["derive"] }
 serde_bytes = "0.11.15"
 crc = "3.2.1"
 sha1_smol = "1.0.1"
-ed25519-dalek = "=3.0.0-pre.1"
-iroh-base = { version = "0.97", default-features = false, features = ["key"] }
+ed25519-dalek = "=3.0.0-pre.6"
+iroh-base = { path = "../iroh/iroh-base", default-features = false, features = ["key"] }
 tracing = "0.1"
 lru = { version = "0.13.0", default-features = false }
 dyn-clone = "1.0.18"

@@ -47,7 +47,7 @@
 //!
 
 use dashmap::DashSet;
-use dht::{Dht, Id};
+use iroh_mainline::{Dht, Id};
 use std::sync::Arc;
 use tracing::{debug, info};
 

@@ -410,7 +410,7 @@ impl Dht {
 
         while let Some(item) = stream.0.recv().await {
             if let Some(mr) = &most_recent {
-                if item.seq() == mr.seq && item.value() > &mr.value {
+                if item.seq() == mr.seq && item.value() > &*mr.value {
                     most_recent = Some(item)
                 }
             } else {
