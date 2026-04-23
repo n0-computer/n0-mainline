@@ -29,7 +29,7 @@
 //! 75 .. 84 [  1 ]: ∎
 //! 84 .. 93 [ 15 ]: ∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
 
-use iroh_mainline::{Dht, Id, Node};
+use n0_mainline::{Dht, Id, Node};
 use histo::Histogram;
 use std::{
     collections::{HashMap, HashSet},

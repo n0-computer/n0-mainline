@@ -1,14 +1,15 @@
 [package]
-name = "iroh-mainline"
+name = "n0-mainline"
 version = "6.4.0"
-authors = ["nuh.dev"]
+authors = ["n0 team", "Ruediger Klaehn <rklaehn@protonmail.com>", "nuh.dev"]
 edition = "2021"
-description = "Simple, robust, BitTorrent's Mainline DHT implementation"
-homepage = "https://github.com/nuhvi/mainline"
-license = "MIT"
+description = "Async BitTorrent Mainline DHT client, forked for iroh"
+homepage = "https://github.com/n0-computer/n0-mainline"
+license = "MIT OR Apache-2.0"
 keywords = ["bittorrent", "torrent", "dht", "kademlia", "mainline"]
 categories = ["network-programming"]
-repository = "https://github.com/nuhvi/mainline"
+repository = "https://github.com/n0-computer/n0-mainline"
+readme = "README.md"
 exclude = ["/docs/*", "/examples/*", "/beps/*"]
 
 [dependencies]

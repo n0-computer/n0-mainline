@@ -10,7 +10,7 @@
 //!
 //! ## Why Run This Example?
 //!
-//! - **Educational Purpose**: To understand how the methods of the `mainline` crate can be applied
+//! - **Educational Purpose**: To understand how the methods of the `n0-mainline` crate can be applied
 //!   to estimate the size of a DHT or other distributed systems without any implicit assumption of
 //!   node id distributions.
 //!
@@ -47,7 +47,7 @@
 //!
 
 use dashmap::DashSet;
-use iroh_mainline::{Dht, Id};
+use n0_mainline::{Dht, Id};
 use std::sync::Arc;
 use tracing::{debug, info};
 

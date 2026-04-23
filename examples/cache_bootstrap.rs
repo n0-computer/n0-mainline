@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use iroh_mainline::Dht;
+use n0_mainline::Dht;
 
 #[tokio::main]
 async fn main() {

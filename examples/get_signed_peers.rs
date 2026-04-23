@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures::StreamExt;
-use iroh_mainline::{Dht, Id};
+use n0_mainline::{Dht, Id};
 
 use clap::Parser;
 

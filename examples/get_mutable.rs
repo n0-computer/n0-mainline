@@ -4,7 +4,7 @@ use std::convert::TryFrom;
 use std::time::Instant;
 
 use futures::StreamExt;
-use iroh_mainline::{Dht, MutableItem};
+use n0_mainline::{Dht, MutableItem};
 
 use clap::Parser;
 

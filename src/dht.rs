@@ -577,7 +577,7 @@ mod test {
 
         let signer = SecretKey::generate();
         let key = *signer.public().as_bytes();
-        let value = b"hello from iroh-mainline test";
+        let value = b"hello from n0-mainline test";
 
         let item = MutableItem::new(&signer, value, 1, None);
 
