@@ -201,15 +201,14 @@ impl Dht {
     /// a request directly to these nodes (using `extra_nodes` parameter), then you should
     /// use [Self::get_closest_nodes] instead.
     pub async fn find_node(&self, target: Id) -> Box<[Node]> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             ResponseSender::ClosestNodes(tx),
         ))
         .await;
 
-        rx.recv()
-            .await
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -341,18 +340,18 @@ impl Dht {
 
     /// Get an Immutable data by its sha1 hash.
     pub async fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
                 seq: None,
                 salt: None,
             }),
-            ResponseSender::Immutable(tx),
+            ResponseSender::Immutable(Some(tx)),
         ))
         .await;
 
-        rx.recv().await
+        rx.await.ok()
     }
 
     /// Put an immutable data to the DHT.
@@ -503,7 +502,7 @@ impl Dht {
     /// Useful to [Self::put] a request to nodes further from the 20 closest nodes to the
     /// [PutRequestSpecific::target]. Which itself is useful to circumvent [extreme vertical sybil attacks](https://github.com/nuhvi/mainline/blob/main/docs/censorship-resistance.md#extreme-vertical-sybil-attacks).
     pub async fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -514,8 +513,7 @@ impl Dht {
         ))
         .await;
 
-        rx.recv()
-            .await
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -533,11 +531,10 @@ impl Dht {
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
     ) -> Result<Id, PutError> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Put(request, tx, extra_nodes)).await;
 
-        rx.recv()
-            .await
+        rx.await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -845,7 +842,7 @@ mod test {
         {
             let item = MutableItem::new(&signer, &[], 1000, None);
 
-            let (tx, _rx) = mpsc::unbounded_channel();
+            let (tx, _rx) = oneshot::channel();
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
             client

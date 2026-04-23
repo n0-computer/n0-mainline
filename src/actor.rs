@@ -30,7 +30,7 @@ struct Actor {
     pub(crate) socket: KrpcSocket,
     core: Core,
 
-    put_senders: HashMap<Id, Vec<mpsc::UnboundedSender<Result<Id, PutError>>>>,
+    put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
     get_senders: HashMap<Id, Vec<ResponseSender>>,
 }
 
@@ -159,8 +159,8 @@ impl Actor {
 
         // Response for an ongoing GET query
         if let Some((target, response)) = new_query_response {
-            if let Some(senders) = self.get_senders.get(&target) {
-                for sender in senders {
+            if let Some(senders) = self.get_senders.get_mut(&target) {
+                for sender in senders.iter_mut() {
                     send(sender, response.clone());
                 }
             }
@@ -424,12 +424,12 @@ pub(crate) async fn run(config: Config, mut receiver: mpsc::Receiver<ActorMessag
                                         }
                                     };
                                 }
-                                ActorMessage::Get(request, sender) => {
+                                ActorMessage::Get(request, mut sender) => {
                                     let target = request.target();
 
                                     let responses = actor.get(request, None);
                                     for response in responses {
-                                        send(&sender, response);
+                                        send(&mut sender, response);
                                     }
 
                                     let senders = actor.get_senders.entry(target).or_default();
@@ -468,7 +468,7 @@ pub(crate) async fn run(config: Config, mut receiver: mpsc::Receiver<ActorMessag
     };
 }
 
-fn send(sender: &ResponseSender, response: Response) {
+fn send(sender: &mut ResponseSender, response: Response) {
     match (sender, response) {
         (ResponseSender::Peers(s), Response::Peers(r)) => {
             let _ = s.send(r);
@@ -480,7 +480,9 @@ fn send(sender: &ResponseSender, response: Response) {
             let _ = s.send(r);
         }
         (ResponseSender::Immutable(s), Response::Immutable(r)) => {
-            let _ = s.send(r);
+            if let Some(tx) = s.take() {
+                let _ = tx.send(r);
+            }
         }
         _ => {}
     }
@@ -491,7 +493,7 @@ pub(crate) enum ActorMessage {
     Info(oneshot::Sender<Info>),
     Put(
         PutRequestSpecific,
-        mpsc::UnboundedSender<Result<Id, PutError>>,
+        oneshot::Sender<Result<Id, PutError>>,
         Option<Box<[Node]>>,
     ),
     Get(GetRequestSpecific, ResponseSender),
@@ -500,15 +502,11 @@ pub(crate) enum ActorMessage {
 }
 
 /// Sender side for streaming GET query results back to the caller.
-///
-/// All variants use `mpsc::UnboundedSender` because `ResponseSender` must be `Clone`
-/// (multiple queries can share senders). `ClosestNodes` and `Immutable` only ever send
-/// a single value (like a oneshot), but `oneshot::Sender` is not `Clone`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ResponseSender {
-    ClosestNodes(mpsc::UnboundedSender<Box<[Node]>>),
+    ClosestNodes(oneshot::Sender<Box<[Node]>>),
     Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
     SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
     Mutable(mpsc::UnboundedSender<MutableItem>),
-    Immutable(mpsc::UnboundedSender<Box<[u8]>>),
+    Immutable(Option<oneshot::Sender<Box<[u8]>>>),
 }
