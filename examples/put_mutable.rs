@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use dht::{Dht, MutableItem, SecretKey};
+use n0_mainline::{Dht, MutableItem, SecretKey};
 
 use clap::Parser;
 

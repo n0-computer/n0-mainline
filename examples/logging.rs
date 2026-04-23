@@ -1,5 +1,5 @@
 use colored::*;
-use dht::Dht;
+use n0_mainline::Dht;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, enabled, info, Level, Subscriber};
 use tracing_subscriber::{
@@ -519,7 +519,7 @@ async fn main() {
         .with_file(true)
         .with_ansi(true)
         .with_line_number(true)
-        .event_format(DhtFormatter::default())
+        .event_format(DhtFormatter)
         .init();
 
     // Configure and start the DHT node in server mode

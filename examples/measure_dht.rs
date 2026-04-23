@@ -1,4 +1,4 @@
-use dht::{Dht, Id};
+use n0_mainline::{Dht, Id};
 
 #[tokio::main]
 async fn main() {
@@ -48,7 +48,7 @@ fn format_number(num: usize) -> String {
 
     for (i, c) in num_str.chars().enumerate() {
         // Add a comma before every three digits, except for the first part
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);

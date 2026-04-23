@@ -117,7 +117,7 @@ impl UdpIo {
 /// A UdpSocket wrapper that formats and correlates DHT requests and responses.
 ///
 /// Sends are queued synchronously and flushed asynchronously via [`Self::flush`].
-/// Receives are fully async via [`Self::recv_from_async`].
+/// Receives are fully async via [`Self::recv_from`].
 #[derive(Debug)]
 pub struct KrpcSocket {
     io: UdpIo,
@@ -246,7 +246,7 @@ impl KrpcSocket {
     }
 
     /// Async receive: waits for a datagram and returns a parsed KRPC message.
-    pub async fn recv_from_async(&mut self) -> Option<(Message, SocketAddrV4)> {
+    pub async fn recv_from(&mut self) -> Option<(Message, SocketAddrV4)> {
         let mut buf = [0u8; MTU];
 
         self.inflight_requests.cleanup();
@@ -638,7 +638,7 @@ mod test {
         client.flush().await;
 
         let (message, from) = loop {
-            if let Some(result) = server.recv_from_async().await {
+            if let Some(result) = server.recv_from().await {
                 break result;
             }
         };
@@ -672,7 +672,7 @@ mod test {
         client.flush().await;
 
         let (message, from) = loop {
-            if let Some(result) = server.recv_from_async().await {
+            if let Some(result) = server.recv_from().await {
                 break result;
             }
         };
@@ -714,7 +714,7 @@ mod test {
         // Use a timeout to avoid hanging - recv should not return a valid response
         let result = tokio::time::timeout(
             Duration::from_millis(50),
-            server.recv_from_async(),
+            server.recv_from(),
         )
         .await;
 

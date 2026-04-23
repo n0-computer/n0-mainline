@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use dht::Dht;
+use n0_mainline::Dht;
 
 use clap::Parser;
 

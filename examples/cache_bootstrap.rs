@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use dht::Dht;
+use n0_mainline::Dht;
 
 #[tokio::main]
 async fn main() {
@@ -58,8 +58,8 @@ fn load() -> Vec<String> {
 
 fn save(bootstrap: Vec<String>) {
     let bootstrap_content = bootstrap.join("\n");
-    let mut file = fs::File::create(&nodes_file()).expect("Failed to save bootstrapping nodes");
-    file.write(bootstrap_content.as_bytes())
+    let mut file = fs::File::create(nodes_file()).expect("Failed to save bootstrapping nodes");
+    file.write_all(bootstrap_content.as_bytes())
         .expect("Failed to write bootstrapping nodes");
 }
 

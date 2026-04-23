@@ -1,17 +1,14 @@
-# Mainline
+# n0-mainline
 
 Simple, robust, BitTorrent's [Mainline DHT](https://en.wikipedia.org/wiki/Mainline_DHT) implementation.
 
-This library is focused on being the best and simplest Rust client for Mainline, especially focused on reliable and fast time-to-first-response.
+This is an iroh-flavored fork of [nuhvi/dht](https://github.com/nuhvi/dht): it is a support crate for [iroh](https://github.com/n0-computer/iroh) and integrates with the iroh ecosystem (e.g. [`iroh-base`](https://crates.io/crates/iroh-base) keys, async UDP via [`noq-udp`](https://crates.io/crates/noq-udp)). It does **not** depend on the `iroh` crate itself, so it can be used standalone. It does however require `noq-udp` for its socket layer.
 
-It should work as a routing / storing node (server mode) as well, and has been running in production for many months without an issue. 
-However if you are concerned about spam or DoS, you should consider implementing [rate limiting](#rate-limiting).
-
-**[API Docs](https://docs.rs/dht/latest/dht/)**
+The main purpose for which iroh uses n0-mainline is endpoint address lookup via BEP_0044.
 
 ## Getting started
 
-Check the [Examples](https://github.com/nuhvi/mainline/tree/main/examples).
+Check the [Examples](https://github.com/n0-computer/n0-mainline/tree/main/examples).
 
 ## Features
 
@@ -20,7 +17,7 @@ Check the [Examples](https://github.com/nuhvi/mainline/tree/main/examples).
 Running as a client, means you can store and query for values on the DHT, but not accept any incoming requests.
 
 ```rust,ignore
-use dht::Dht;
+use n0_mainline::Dht;
 
 let dht = Dht::client().await.unwrap();
 ```
@@ -30,7 +27,6 @@ Supported BEPs:
 - [x] [BEP_0042 DHT Security extension](https://www.bittorrent.org/beps/bep_0042.html)
 - [x] [BEP_0043 Read-only DHT Nodes](https://www.bittorrent.org/beps/bep_0043.html)
 - [x] [BEP_0044 Storing arbitrary data in the DHT](https://www.bittorrent.org/beps/bep_0044.html)
-- [x] [BEP_???? Announce and lookup signed peers](https://github.com/bittorrent/bittorrent.org/pull/174).
 
 This implementation also includes [measures against Vertical Sybil Attacks](https://github.com/Nuhvi/mainline/blob/main/docs/censorship-resistance.md#vertical-sybil-attacks).
 
@@ -39,9 +35,9 @@ This implementation also includes [measures against Vertical Sybil Attacks](http
 Running as a server is the same as a client, but you also respond to incoming requests and serve as a routing and storing node, supporting the general routing of the DHT, and contributing to the storage capacity of the DHT.
 
 ```rust,ignore
-use dht::Dht;
+use n0_mainline::Dht;
 
-let dht = Dht::server().await.unwrap(); // or `Dht::builder::server_mode().build().await;`
+let dht = Dht::server().await.unwrap(); // or `Dht::builder().server_mode().build().await;`
 ```
 
 Supported BEPs:
@@ -49,7 +45,6 @@ Supported BEPs:
 - [x] [BEP_0042 DHT Security extension](https://www.bittorrent.org/beps/bep_0042.html)
 - [x] [BEP_0043 Read-only DHT Nodes](https://www.bittorrent.org/beps/bep_0043.html)
 - [x] [BEP_0044 Storing arbitrary data in the DHT](https://www.bittorrent.org/beps/bep_0044.html)
-- [x] [BEP_???? Announce and lookup signed peers](https://github.com/bittorrent/bittorrent.org/pull/174).
 
 #### Rate limiting
 
@@ -62,8 +57,8 @@ The default Adaptive mode will start the node in client mode, and after 15 minut
 it will switch to server mode. This way nodes that can serve as routing nodes (accessible and less likely to churn), serve as such.
 
 If you want to explicitly start in Server mode, because you know you are not running behind firewall,
-you can call `Dht::builder().server_mode().build()`, and you can optionally add your known public ip so the node doesn't have to depend on,
-votes from responding nodes: `Dht::builder().server_mode().public_ip().build()`.
+you can call `Dht::builder().server_mode().build().await`, and you can optionally add your known public ip so the node doesn't have to depend on,
+votes from responding nodes: `Dht::builder().server_mode().public_ip().build().await`.
 
 ## Acknowledgment
 

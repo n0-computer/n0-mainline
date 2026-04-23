@@ -1,7 +1,7 @@
 use std::{collections::HashSet, str::FromStr, time::Instant};
 
 use futures::StreamExt;
-use dht::{Dht, Id};
+use n0_mainline::{Dht, Id};
 
 use clap::Parser;
 

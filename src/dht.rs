@@ -410,7 +410,7 @@ impl Dht {
 
         while let Some(item) = stream.0.recv().await {
             if let Some(mr) = &most_recent {
-                if item.seq() == mr.seq && item.value() > &mr.value {
+                if item.seq() == mr.seq && item.value() > &*mr.value {
                     most_recent = Some(item)
                 }
             } else {
@@ -565,6 +565,33 @@ mod test {
     use crate::core::ConcurrencyError;
 
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "hits the real mainline DHT; run with --ignored"]
+    async fn put_get_mutable_real_dht() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("debug")
+            .try_init();
+
+        let dht = Dht::client().await.unwrap();
+
+        let signer = SecretKey::generate();
+        let key = *signer.public().as_bytes();
+        let value = b"hello from n0-mainline test";
+
+        let item = MutableItem::new(&signer, value, 1, None);
+
+        dht.put_mutable(item.clone(), None).await.unwrap();
+
+        let response = dht
+            .get_mutable(&key, None, None)
+            .next()
+            .await
+            .expect("should resolve mutable item from real DHT");
+
+        assert_eq!(response.value(), value.as_slice());
+        assert_eq!(response.seq(), 1);
+    }
 
     #[tokio::test]
     async fn bind_twice() {

@@ -29,7 +29,7 @@
 //! 75 .. 84 [  1 ]: ∎
 //! 84 .. 93 [ 15 ]: ∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
 
-use dht::{Dht, Id, Node};
+use n0_mainline::{Dht, Id, Node};
 use histo::Histogram;
 use std::{
     collections::{HashMap, HashSet},
@@ -112,7 +112,7 @@ async fn main() {
             ip_hits.len(),
             closest_distance,
             furthest_distance,
-            (overlap*100 as f64) as usize
+            (overlap*100_f64) as usize
         );
     }
 
@@ -126,7 +126,7 @@ fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
     let percents: HashMap<Ipv4Addr, u64> = hits
         .into_iter()
         .map(|(ip, hits)| {
-            let percent = (hits as f32 / lookup_count as f32) * 100 as f32;
+            let percent = (hits as f32 / lookup_count as f32) * 100_f32;
             (ip, percent as u64)
         })
         .collect();
@@ -145,7 +145,7 @@ async fn get_random_boostrap_nodes2() -> Vec<String> {
         .iter()
         .map(|node| node.address().to_string())
         .collect::<Box<[_]>>();
-    let slice: Vec<String> = addrs[..8].iter().map(|va| va.clone()).collect();
+    let slice: Vec<String> = addrs[..8].to_vec();
     slice
 }
 

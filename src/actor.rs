@@ -446,7 +446,7 @@ pub(crate) async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<Ac
                             }
                         }
                     }
-                    packet = actor.socket.recv_from_async() => {
+                    packet = actor.socket.recv_from() => {
                         if let Some((message, from)) = packet {
                             actor.process_message(message, from);
                         }
