@@ -1,10 +1,10 @@
 use tracing::{debug, trace};
 
 use crate::{
+    Node,
     common::{
         ErrorSpecific, Id, PutRequest, PutRequestSpecific, RequestSpecific, RequestTypeSpecific,
     },
-    Node,
 };
 
 use crate::actor::socket::KrpcSocket;
@@ -255,7 +255,9 @@ pub enum ConcurrencyError {
     /// The [crate::MutableItem::seq] is less than or equal the sequence from another signed item.
     ///
     /// Try reading most recent mutable item before writing again.
-    #[error("MutableItem::seq is not the most recent, try reading most recent item before writing again.")]
+    #[error(
+        "MutableItem::seq is not the most recent, try reading most recent item before writing again."
+    )]
     NotMostRecent,
 
     /// The `CAS` condition does not match the `seq` of the most recent known signed item.

@@ -2,9 +2,10 @@ use std::net::SocketAddrV4;
 
 use tracing::info;
 
-use crate::core::supports_signed_peers;
 use crate::RequestSpecific;
-use crate::{core::Core, MessageType};
+use crate::common::messages::MessageType;
+use crate::core::Core;
+use crate::core::supports_signed_peers;
 
 use crate::common::{Id, Node, RequestTypeSpecific};
 
@@ -66,20 +67,21 @@ impl Core {
         request_from_read_only_node: bool,
         request_specific: &RequestSpecific,
     ) {
-        if self.server_mode && !request_from_read_only_node {
-            if let RequestTypeSpecific::FindNode(ref param) = request_specific.request_type {
-                let node = Node::new(param.target, from);
-                let supports_signed_peers = supports_signed_peers(version);
+        if self.server_mode
+            && !request_from_read_only_node
+            && let RequestTypeSpecific::FindNode(ref param) = request_specific.request_type
+        {
+            let node = Node::new(param.target, from);
+            let supports_signed_peers = supports_signed_peers(version);
 
-                if self.bootstrap.is_empty() {
-                    self.routing_table.add(node.clone());
+            if self.bootstrap.is_empty() {
+                self.routing_table.add(node.clone());
 
-                    if supports_signed_peers {
-                        self.signed_peers_routing_table.add(node);
-                    }
-                } else if supports_signed_peers {
+                if supports_signed_peers {
                     self.signed_peers_routing_table.add(node);
                 }
+            } else if supports_signed_peers {
+                self.signed_peers_routing_table.add(node);
             }
         }
     }

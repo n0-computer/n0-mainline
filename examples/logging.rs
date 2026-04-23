@@ -1,9 +1,9 @@
 use colored::*;
 use n0_mainline::Dht;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, enabled, info, Level, Subscriber};
+use tracing::{Level, Subscriber, debug, enabled, info};
 use tracing_subscriber::{
-    fmt::{format::Writer, FmtContext, FormatEvent, FormatFields},
+    fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
     registry::LookupSpan,
 };
 

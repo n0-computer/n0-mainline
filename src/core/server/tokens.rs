@@ -1,6 +1,6 @@
 //! Manage tokens for remote client IPs.
 
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{CRC_32_ISCSI, Crc};
 use rand::Rng;
 use std::{
     fmt::{self, Debug, Formatter},

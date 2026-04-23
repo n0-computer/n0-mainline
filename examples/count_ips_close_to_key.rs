@@ -54,7 +54,9 @@ async fn main() -> anyhow::Result<()> {
     let mut ip_hits: HashMap<Ipv4Addr, u16> = HashMap::new();
     let (tx_interrupted, rx_interrupted) = channel();
 
-    println!("Count all IP addresses around a random target_key={target} k={K} max_distance={MAX_DISTANCE} random_boostrap={USE_RANDOM_BOOTSTRAP_NODES}.");
+    println!(
+        "Count all IP addresses around a random target_key={target} k={K} max_distance={MAX_DISTANCE} random_boostrap={USE_RANDOM_BOOTSTRAP_NODES}."
+    );
     println!("Press CTRL+C to show the histogram");
     println!();
 
@@ -112,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
             ip_hits.len(),
             closest_distance,
             furthest_distance,
-            (overlap*100_f64) as usize
+            (overlap * 100_f64) as usize
         );
     }
 

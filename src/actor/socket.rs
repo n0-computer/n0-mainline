@@ -469,13 +469,12 @@ impl InflightRequests {
     }
 
     fn get(&self, key: u32) -> Option<&InflightRequest> {
-        if let Ok(index) = self.find_by_tid(key) {
-            if let Some(request) = self.requests.get(index) {
-                if request.sent_at.elapsed() < self.request_timeout() {
-                    return Some(request);
-                }
-            };
-        }
+        if let Ok(index) = self.find_by_tid(key)
+            && let Some(request) = self.requests.get(index)
+            && request.sent_at.elapsed() < self.request_timeout()
+        {
+            return Some(request);
+        };
 
         None
     }
@@ -576,8 +575,8 @@ impl Debug for InflightRequests {
 #[cfg(test)]
 fn supports_request(version: &[u8; 4], request_specific: &crate::common::RequestSpecific) -> bool {
     use crate::{
-        common::{PutRequest, RequestTypeSpecific},
         PutRequestSpecific,
+        common::{PutRequest, RequestTypeSpecific},
     };
     match request_specific.request_type {
         RequestTypeSpecific::GetSignedPeers(_)

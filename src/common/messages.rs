@@ -9,7 +9,7 @@ mod internal;
 use std::convert::TryInto;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use crate::common::{Id, Node, ID_SIZE};
+use crate::common::{ID_SIZE, Id, Node};
 
 use super::InvalidIdSize;
 
@@ -46,38 +46,69 @@ pub struct ErrorSpecific {
     pub description: String,
 }
 
+/// An incoming KRPC request, as observed by the local node.
+///
+/// Mostly useful as the input to a custom [`RequestFilter`](crate::RequestFilter)
+/// when the node is running in server mode.
 #[derive(Debug, PartialEq, Clone)]
 pub struct RequestSpecific {
+    /// The [`Id`] claimed by the node sending the request.
     pub requester_id: Id,
+    /// The body of the request, indicating which operation the sender wants performed.
     pub request_type: RequestTypeSpecific,
 }
 
+/// The kind of KRPC request, with operation-specific arguments.
 #[derive(Debug, PartialEq, Clone)]
 pub enum RequestTypeSpecific {
+    /// Liveness check; expects no payload back.
     Ping,
+    /// Find the closest known nodes to a target [`Id`].
     FindNode(FindNodeRequestArguments),
+    /// Look up announced peers for an info hash ([BEP_0005](https://www.bittorrent.org/beps/bep_0005.html)).
     GetPeers(GetPeersRequestArguments),
+    /// Look up signed peers for an info hash (proposed signed-peers BEP).
     GetSignedPeers(GetPeersRequestArguments),
+    /// Get a value (immutable or mutable) by target ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
     GetValue(GetValueRequestArguments),
 
+    /// A storage request — see [`PutRequestSpecific`] for the variants.
     Put(PutRequest),
 }
 
+/// A storage request paired with the write token obtained from a previous lookup.
 #[derive(Debug, PartialEq, Clone)]
 pub struct PutRequest {
+    /// Opaque write token previously handed out by the storing node.
     pub token: Box<[u8]>,
+    /// The specific kind of write being performed.
     pub put_request_type: PutRequestSpecific,
 }
 
+/// The kind of storage request, with operation-specific arguments.
+///
+/// This is the parameter passed to [`Dht::put`](crate::Dht::put) for low-level
+/// access. The high-level wrappers ([`Dht::put_immutable`](crate::Dht::put_immutable),
+/// [`Dht::put_mutable`](crate::Dht::put_mutable),
+/// [`Dht::announce_peer`](crate::Dht::announce_peer)) construct one of these
+/// internally.
 #[derive(Debug, PartialEq, Clone)]
 pub enum PutRequestSpecific {
+    /// Announce that the sender is a peer for an info hash ([BEP_0005](https://www.bittorrent.org/beps/bep_0005.html)).
     AnnouncePeer(AnnouncePeerRequestArguments),
+    /// Announce a signed peer for an info hash (proposed signed-peers BEP).
     AnnounceSignedPeer(AnnounceSignedPeerRequestArguments),
+    /// Store an immutable value, addressed by its sha1 hash ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
     PutImmutable(PutImmutableRequestArguments),
+    /// Store a mutable value, addressed by an ed25519 public key (and optional salt) ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
     PutMutable(PutMutableRequestArguments),
 }
 
 impl PutRequestSpecific {
+    /// The target [`Id`] this storage request will be routed to.
+    ///
+    /// For peer announcements this is the info hash; for value puts it's the
+    /// content-addressed (immutable) or key-derived (mutable) target.
     pub fn target(&self) -> &Id {
         match self {
             PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {

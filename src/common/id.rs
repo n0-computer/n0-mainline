@@ -1,5 +1,5 @@
 //! Kademlia node Id or a lookup target
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{CRC_32_ISCSI, Crc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;

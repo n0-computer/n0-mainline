@@ -1,6 +1,6 @@
 use std::{collections::HashSet, convert::TryInto};
 
-use crate::{common::MAX_BUCKET_SIZE_K, Id, Node};
+use crate::{Id, Node, common::MAX_BUCKET_SIZE_K};
 
 #[derive(Debug, Clone)]
 /// Manage closest nodes found in a query.
