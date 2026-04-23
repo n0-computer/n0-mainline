@@ -14,7 +14,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -28,14 +28,13 @@ async fn main() {
     // of the topic you are interested in and a namespacing based on the overlay
     // network you are using, and any other diffrentiators to filter out peers
     // you can't or don't want to connect to by accident.
-    let info_hash = Id::from_str(cli.infohash.as_str()).expect("invalid infohash");
+    let info_hash = Id::from_str(cli.infohash.as_str())?;
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
-    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)
-        .expect("Invalid secret key")
+    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)?
         .try_into()
-        .expect("secret key must be 32 bytes");
+        .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))?;
     let signer = SigningKey::from_bytes(&secret_bytes);
 
     println!(
@@ -45,21 +44,23 @@ async fn main() {
     );
 
     println!("\n=== COLD QUERY ===");
-    announce(&dht, info_hash, &signer).await;
+    announce(&dht, info_hash, &signer).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    announce(&dht, info_hash, &signer).await;
+    announce(&dht, info_hash, &signer).await?;
+
+    Ok(())
 }
 
-async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
+async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    dht.announce_signed_peer(info_hash, signer)
-        .await
-        .expect("announce_peer failed");
+    dht.announce_signed_peer(info_hash, signer).await?;
 
     println!(
         "Announced peer in {:?} seconds",
         start.elapsed().as_secs_f32()
     );
+
+    Ok(())
 }

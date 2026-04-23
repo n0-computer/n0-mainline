@@ -230,6 +230,10 @@ pub enum PutQueryError {
     /// PutQuery timed out with no responses neither success or errors
     #[error("PutQuery timed out with no responses neither success or errors")]
     Timeout,
+
+    /// The DHT actor task has shut down.
+    #[error("DHT actor task has shut down")]
+    Shutdown,
 }
 
 #[n0_error::stack_error(derive, std_sources)]

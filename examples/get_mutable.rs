@@ -16,7 +16,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -26,22 +26,22 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let public_key = from_hex(cli.public_key.clone()).to_bytes();
-    let dht = Dht::client().await.unwrap();
+    let public_key = from_hex(cli.public_key.clone())?.to_bytes();
+    let dht = Dht::client().await?;
 
     println!("Looking up mutable item: {} ...", cli.public_key);
 
     println!("\n=== COLD LOOKUP ===");
-    get_first(&dht, &public_key).await;
+    get_first(&dht, &public_key).await?;
 
     println!("\n=== SUBSEQUENT LOOKUP ===");
-    get_first(&dht, &public_key).await;
+    get_first(&dht, &public_key).await?;
 
     println!("\n=== GET MOST RECENT ===");
     let start = Instant::now();
 
     println!("\nLooking up the most recent value..");
-    let item = dht.get_mutable_most_recent(&public_key, None).await;
+    let item = dht.get_mutable_most_recent(&public_key, None).await?;
 
     if let Some(item) = item {
         println!("Found the most recent value:");
@@ -54,11 +54,13 @@ async fn main() {
         "\nQuery exhausted in {:?} seconds.",
         start.elapsed().as_secs_f32(),
     );
+
+    Ok(())
 }
 
-async fn get_first(dht: &Dht, public_key: &[u8; 32]) {
+async fn get_first(dht: &Dht, public_key: &[u8; 32]) -> anyhow::Result<()> {
     let start = Instant::now();
-    if let Some(item) = dht.get_mutable(public_key, None, None).await.next().await {
+    if let Some(item) = dht.get_mutable(public_key, None, None).await?.next().await {
         println!(
             "\nGot first result in {:?} milliseconds:",
             start.elapsed().as_millis()
@@ -67,6 +69,7 @@ async fn get_first(dht: &Dht, public_key: &[u8; 32]) {
     } else {
         println!("Not Found")
     }
+    Ok(())
 }
 
 fn print_value(item: &MutableItem) {
@@ -80,18 +83,7 @@ fn print_value(item: &MutableItem) {
     };
 }
 
-fn from_hex(s: String) -> VerifyingKey {
-    if !s.len().is_multiple_of(2) {
-        panic!("Number of Hex characters should be even");
-    }
-
-    let mut bytes = Vec::with_capacity(s.len() / 2);
-
-    for i in 0..s.len() / 2 {
-        let byte_str = &s[i * 2..(i * 2) + 2];
-        let byte = u8::from_str_radix(byte_str, 16).expect("Invalid hex character");
-        bytes.push(byte);
-    }
-
-    VerifyingKey::try_from(bytes.as_slice()).expect("Invalid mutable key")
+fn from_hex(s: String) -> anyhow::Result<VerifyingKey> {
+    let bytes = hex::decode(&s)?;
+    Ok(VerifyingKey::try_from(bytes.as_slice())?)
 }

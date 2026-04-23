@@ -12,7 +12,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -22,28 +22,29 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
     let value = cli.value.as_bytes();
 
     println!("\nStoring immutable data: {} ...\n", cli.value);
     println!("\n=== COLD QUERY ===");
-    put_immutable(&dht, value).await;
+    put_immutable(&dht, value).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    put_immutable(&dht, value).await;
+    put_immutable(&dht, value).await?;
+
+    Ok(())
 }
 
-async fn put_immutable(dht: &Dht, value: &[u8]) {
+async fn put_immutable(dht: &Dht, value: &[u8]) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    let info_hash = dht
-        .put_immutable(value)
-        .await
-        .expect("put immutable failed");
+    let info_hash = dht.put_immutable(value).await?;
 
     println!(
         "Stored immutable data as {:?} in {:?} milliseconds",
         info_hash,
         start.elapsed().as_millis()
     );
+
+    Ok(())
 }

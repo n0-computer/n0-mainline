@@ -17,7 +17,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -27,28 +27,30 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let info_hash = Id::from_str(cli.infohash.as_str()).expect("Expected info_hash");
+    let info_hash = Id::from_str(cli.infohash.as_str())?;
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
-    dht.bootstrapped().await;
+    dht.bootstrapped().await?;
 
     println!("Looking up peers for info_hash: {} ...", info_hash);
     println!("\n=== COLD QUERY ===");
-    get_peers(&dht, &info_hash).await;
+    get_peers(&dht, &info_hash).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
     println!("Looking up peers for info_hash: {} ...", info_hash);
-    get_peers(&dht, &info_hash).await;
+    get_peers(&dht, &info_hash).await?;
+
+    Ok(())
 }
 
-async fn get_peers(dht: &Dht, info_hash: &Id) {
+async fn get_peers(dht: &Dht, info_hash: &Id) -> anyhow::Result<()> {
     let start = Instant::now();
     let mut first = false;
 
     let mut peers = HashSet::new();
 
-    let mut stream = dht.get_signed_peers(*info_hash).await;
+    let mut stream = dht.get_signed_peers(*info_hash).await?;
     while let Some(response) = stream.next().await {
         if !first {
             first = true;
@@ -76,6 +78,8 @@ async fn get_peers(dht: &Dht, info_hash: &Id) {
         start.elapsed().as_millis(),
         peers.len()
     );
+
+    Ok(())
 }
 fn to_hex(bytes: &[u8]) -> String {
     let hex_chars: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
