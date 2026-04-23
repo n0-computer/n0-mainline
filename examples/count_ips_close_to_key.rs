@@ -29,8 +29,8 @@
 //! 75 .. 84 [  1 ]: ∎
 //! 84 .. 93 [ 15 ]: ∎∎∎∎∎∎∎∎∎∎∎∎∎∎∎
 
-use n0_mainline::{Dht, Id, Node};
 use histo::Histogram;
+use n0_mainline::{Dht, Id, Node};
 use std::{
     collections::{HashMap, HashSet},
     net::Ipv4Addr,

@@ -36,7 +36,10 @@ async fn main() {
 async fn put_immutable(dht: &Dht, value: &[u8]) {
     let start = Instant::now();
 
-    let info_hash = dht.put_immutable(value).await.expect("put immutable failed");
+    let info_hash = dht
+        .put_immutable(value)
+        .await
+        .expect("put immutable failed");
 
     println!(
         "Stored immutable data as {:?} in {:?} milliseconds",

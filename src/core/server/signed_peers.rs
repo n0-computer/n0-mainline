@@ -90,17 +90,17 @@ impl SignedPeersStore {
 
 #[cfg(test)]
 mod test {
-    use iroh_base::SecretKey;
+    use ed25519_dalek::SigningKey;
 
     use super::*;
 
-    fn make_signer() -> SecretKey {
+    fn make_signer() -> SigningKey {
         let mut secret_key = [0; 32];
         rand::rng().fill_bytes(&mut secret_key);
-        SecretKey::from_bytes(&secret_key)
+        SigningKey::from_bytes(&secret_key)
     }
 
-    fn make_peer(signer: &SecretKey, target: &Id) -> SignedAnnounce {
+    fn make_peer(signer: &SigningKey, target: &Id) -> SignedAnnounce {
         SignedAnnounce::new(signer, target)
     }
 
@@ -147,8 +147,8 @@ mod test {
                 .map(|p| p.key())
                 .collect::<Vec<_>>(),
             vec![
-                signer3.public().as_bytes(),
-                signer2.public().as_bytes()
+                signer3.verifying_key().as_bytes(),
+                signer2.verifying_key().as_bytes()
             ]
         );
     }

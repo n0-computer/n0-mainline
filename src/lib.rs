@@ -1,5 +1,4 @@
 #![doc = include_str!("../README.md")]
-
 #![deny(missing_docs, unused_must_use)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(
@@ -26,7 +25,7 @@ pub use common::{
 pub use core::server::{RequestFilter, ServerSettings, MAX_INFO_HASHES, MAX_PEERS, MAX_VALUES};
 pub use dht::{Dht, DhtBuilder, GetStream, Testnet};
 
-pub use iroh_base::SecretKey;
+pub use ed25519_dalek::SigningKey;
 
 pub mod errors {
     //! Exported errors
