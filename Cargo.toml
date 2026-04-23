@@ -1,8 +1,8 @@
 [package]
 name = "n0-mainline"
-version = "6.4.0"
+version = "0.1.0"
 authors = ["n0 team", "Ruediger Klaehn <rklaehn@protonmail.com>", "nuh.dev"]
-edition = "2021"
+edition = "2024"
 description = "Async BitTorrent Mainline DHT client, forked for iroh"
 homepage = "https://github.com/n0-computer/n0-mainline"
 license = "MIT OR Apache-2.0"
@@ -11,6 +11,12 @@ categories = ["network-programming"]
 repository = "https://github.com/n0-computer/n0-mainline"
 readme = "README.md"
 exclude = ["/docs/*", "/examples/*", "/beps/*"]
+
+[features]
+default = []
+# Enables APIs related to signed peers, which is not yet a published BEP
+# and is therefore considered unstable.
+unstable_signed_peers = []
 
 [dependencies]
 rand = "0.10"
@@ -44,3 +50,11 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [package.metadata.docs.rs]
 all-features = true
+
+[[example]]
+name = "announce_signed_peer"
+required-features = ["unstable_signed_peers"]
+
+[[example]]
+name = "get_signed_peers"
+required-features = ["unstable_signed_peers"]

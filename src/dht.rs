@@ -5,20 +5,22 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[allow(unused_imports)]
 use ed25519_dalek::SigningKey;
 use futures_core::Stream;
 use tokio::sync::{mpsc, oneshot};
 
+#[allow(unused_imports)]
 use crate::{
-    actor::{config::Config, ActorMessage, Info, ResponseSender},
-    common::{
-        hash_immutable, AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments,
-        FindNodeRequestArguments, GetPeersRequestArguments, GetValueRequestArguments, Id,
-        MutableItem, PutImmutableRequestArguments, PutMutableRequestArguments, PutRequestSpecific,
-        SignedAnnounce,
-    },
-    core::{iterative_query::GetRequestSpecific, ConcurrencyError, PutError, PutQueryError},
     Node, ServerSettings,
+    actor::{ActorMessage, Info, ResponseSender, config::Config},
+    common::{
+        AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, FindNodeRequestArguments,
+        GetPeersRequestArguments, GetValueRequestArguments, Id, MutableItem,
+        PutImmutableRequestArguments, PutMutableRequestArguments, PutRequestSpecific,
+        SignedAnnounce, hash_immutable,
+    },
+    core::{ConcurrencyError, PutError, PutQueryError, iterative_query::GetRequestSpecific},
 };
 
 mod testnet;
@@ -295,6 +297,7 @@ impl Dht {
     /// `info_hash` to this method.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
+    #[cfg(feature = "unstable_signed_peers")]
     pub async fn announce_signed_peer(
         &self,
         info_hash: Id,
@@ -335,6 +338,7 @@ impl Dht {
     /// to implement your own logic for gossipping more peers after you discover the first ones.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
+    #[cfg(feature = "unstable_signed_peers")]
     pub async fn get_signed_peers(
         &self,
         info_hash: Id,
@@ -610,6 +614,7 @@ mod test {
 
     use ed25519_dalek::SigningKey;
     use futures::StreamExt;
+    #[allow(unused_imports)]
     use rand::Rng;
 
     use crate::core::ConcurrencyError;
@@ -996,6 +1001,7 @@ mod test {
         assert!(client.bootstrapped().await.unwrap());
     }
 
+    #[cfg(feature = "unstable_signed_peers")]
     #[tokio::test]
     async fn announce_signed_peers_at_full_adoption() {
         let testnet = Testnet::new(10).await.unwrap();
@@ -1048,6 +1054,7 @@ mod test {
         assert_eq!(keys, expected_keys);
     }
 
+    #[cfg(feature = "unstable_signed_peers")]
     #[tokio::test]
     async fn announce_signed_peers_at_low_adoption() {
         let testnet_legacy = Testnet::new_without_signed_peers(10).await.unwrap();
@@ -1077,10 +1084,11 @@ mod test {
                 .build()
                 .await
                 .unwrap();
-            assert!(a
-                .announce_signed_peer(info_hash, &signers[0])
-                .await
-                .is_err());
+            assert!(
+                a.announce_signed_peer(info_hash, &signers[0])
+                    .await
+                    .is_err()
+            );
             assert_eq!(
                 a.get_signed_peers(info_hash).await.unwrap().next().await,
                 None

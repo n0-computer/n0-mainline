@@ -9,6 +9,7 @@ pub struct Testnet {
     pub nodes: Vec<Dht>,
 }
 
+#[allow(dead_code)]
 impl Testnet {
     /// Create a new testnet with a certain size.
     ///

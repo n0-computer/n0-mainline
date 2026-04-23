@@ -10,14 +10,14 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
+use crate::MutableItem;
 use crate::common::{
     FindNodeRequestArguments, Id, Message, MessageType, Node, PutRequestSpecific, RequestSpecific,
     RequestTypeSpecific, SignedAnnounce,
 };
 use crate::core::{
-    iterative_query::GetRequestSpecific, put_query::PutQuery, Core, PutError, Response,
+    Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
-use crate::MutableItem;
 
 use config::Config;
 use socket::KrpcSocket;
@@ -158,11 +158,11 @@ impl Actor {
         let new_query_response = self.handle_incoming_message(message, from);
 
         // Response for an ongoing GET query
-        if let Some((target, response)) = new_query_response {
-            if let Some(senders) = self.get_senders.get_mut(&target) {
-                for sender in senders.iter_mut() {
-                    send(sender, response.clone());
-                }
+        if let Some((target, response)) = new_query_response
+            && let Some(senders) = self.get_senders.get_mut(&target)
+        {
+            for sender in senders.iter_mut() {
+                send(sender, response.clone());
             }
         }
     }
@@ -255,7 +255,9 @@ impl Actor {
         if self.core.should_refresh_table() {
             self.core.update_last_table_refresh();
             if !self.core.server_mode && !self.core.firewalled {
-                info!("Adaptive mode: have been running long enough (not firewalled), switching to server mode");
+                info!(
+                    "Adaptive mode: have been running long enough (not firewalled), switching to server mode"
+                );
 
                 self.set_server_mode(true);
             }
@@ -351,17 +353,17 @@ impl Actor {
         done_put_queries: &mut Vec<(Id, Option<PutError>)>,
     ) {
         for (id, _) in done_iterative_queries {
-            if let Some(put_query) = self.core.put_queries.get_mut(id) {
-                if let Err(error) = put_query.start(
+            if let Some(put_query) = self.core.put_queries.get_mut(id)
+                && let Err(error) = put_query.start(
                     &mut self.socket,
                     done_iterative_queries
                         .iter()
                         .find(|(this_id, _)| this_id == id)
                         .map(|(_, closest_nodes)| closest_nodes)
                         .expect("done_iterative_queries"),
-                ) {
-                    done_put_queries.push((*id, Some(error)))
-                }
+                )
+            {
+                done_put_queries.push((*id, Some(error)))
             }
         }
     }
@@ -506,6 +508,7 @@ pub(crate) enum ActorMessage {
 pub(crate) enum ResponseSender {
     ClosestNodes(oneshot::Sender<Box<[Node]>>),
     Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
+    #[allow(dead_code)]
     SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
     Mutable(mpsc::UnboundedSender<MutableItem>),
     Immutable(Option<oneshot::Sender<Box<[u8]>>>),

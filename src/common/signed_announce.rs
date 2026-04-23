@@ -20,6 +20,7 @@ pub struct SignedAnnounce {
     pub(crate) signature: [u8; 64],
 }
 
+#[allow(dead_code)]
 impl SignedAnnounce {
     /// Create a new SignedAnnounce for a info_hash.
     pub fn new(signer: &SigningKey, info_hash: &Id) -> Self {

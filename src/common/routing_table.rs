@@ -179,10 +179,10 @@ impl RoutingTable {
     fn contains(&self, node_id: &Id) -> bool {
         let distance = self.id.distance(node_id);
 
-        if let Some(bucket) = self.buckets.get(&distance) {
-            if bucket.contains(node_id) {
-                return true;
-            }
+        if let Some(bucket) = self.buckets.get(&distance)
+            && bucket.contains(node_id)
+        {
+            return true;
         }
         false
     }
@@ -256,17 +256,17 @@ impl Iterator for RoutingTableIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.bucket_index <= 160 {
-            if let Some(current_bucket) = self.table.buckets.get(&self.bucket_index) {
-                if let Some(current_node) = current_bucket.nodes.get(self.node_index) {
-                    self.node_index += 1;
+            if let Some(current_bucket) = self.table.buckets.get(&self.bucket_index)
+                && let Some(current_node) = current_bucket.nodes.get(self.node_index)
+            {
+                self.node_index += 1;
 
-                    if self.node_index == current_bucket.nodes.len() {
-                        self.node_index = 0;
-                        self.bucket_index += 1;
-                    }
-
-                    return Some(current_node.clone());
+                if self.node_index == current_bucket.nodes.len() {
+                    self.node_index = 0;
+                    self.bucket_index += 1;
                 }
+
+                return Some(current_node.clone());
             };
 
             self.bucket_index += 1;
@@ -362,7 +362,7 @@ mod test {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use crate::common::{Id, KBucket, Node, NodeInner, RoutingTable, MAX_BUCKET_SIZE_K};
+    use crate::common::{Id, KBucket, MAX_BUCKET_SIZE_K, Node, NodeInner, RoutingTable};
 
     #[test]
     fn table_is_empty() {

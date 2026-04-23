@@ -11,14 +11,13 @@ use lru::LruCache;
 use tracing::debug;
 
 use crate::common::{
-    validate_immutable, AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments,
-    ErrorSpecific, FindNodeRequestArguments, FindNodeResponseArguments,
-    GetImmutableResponseArguments, GetMutableResponseArguments, GetPeersRequestArguments,
-    GetPeersResponseArguments, GetSignedPeersResponseArguments, GetValueRequestArguments, Id,
-    MutableItem, NoMoreRecentValueResponseArguments, NoValuesResponseArguments,
-    PingResponseArguments, PutImmutableRequestArguments, PutMutableRequestArguments, PutRequest,
-    PutRequestSpecific, RequestTypeSpecific, ResponseSpecific, RoutingTable, SignedAnnounce,
-    MAX_BUCKET_SIZE_K,
+    AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, ErrorSpecific,
+    FindNodeRequestArguments, FindNodeResponseArguments, GetImmutableResponseArguments,
+    GetMutableResponseArguments, GetPeersRequestArguments, GetPeersResponseArguments,
+    GetSignedPeersResponseArguments, GetValueRequestArguments, Id, MAX_BUCKET_SIZE_K, MutableItem,
+    NoMoreRecentValueResponseArguments, NoValuesResponseArguments, PingResponseArguments,
+    PutImmutableRequestArguments, PutMutableRequestArguments, PutRequest, PutRequestSpecific,
+    RequestTypeSpecific, ResponseSpecific, RoutingTable, SignedAnnounce, validate_immutable,
 };
 
 use peers::PeersStore;
@@ -84,20 +83,12 @@ impl Default for Server {
 /// Settings for the default dht server.
 pub struct ServerSettings {
     /// The maximum info_hashes for which to store peers.
-    ///
-    /// Defaults to [MAX_INFO_HASHES]
     pub max_info_hashes: usize,
     /// The maximum peers to store per info_hash.
-    ///
-    /// Defaults to [MAX_PEERS]
     pub max_peers_per_info_hash: usize,
     /// Maximum number of immutable values to store.
-    ///
-    /// Defaults to [MAX_VALUES]
     pub max_immutable_values: usize,
     /// Maximum number of mutable values to store.
-    ///
-    /// Defaults to [MAX_VALUES]
     pub max_mutable_values: usize,
     /// Filter requests before handling them.
     ///
@@ -411,30 +402,30 @@ impl Server {
                             description: "Message (v field) too big.".to_string(),
                         }));
                     }
-                    if let Some(ref salt) = salt {
-                        if salt.len() > 64 {
-                            return Some(MessageType::Error(ErrorSpecific {
-                                code: 207,
-                                description: "salt (salt field) too big.".to_string(),
-                            }));
-                        }
+                    if let Some(ref salt) = salt
+                        && salt.len() > 64
+                    {
+                        return Some(MessageType::Error(ErrorSpecific {
+                            code: 207,
+                            description: "salt (salt field) too big.".to_string(),
+                        }));
                     }
                     if let Some(previous) = self.mutable_values.get(&target) {
-                        if let Some(cas) = cas {
-                            if previous.seq() != cas {
-                                debug!(
-                                    ?target,
-                                    ?requester_id,
-                                    ?from,
-                                    "CAS mismatched, re-read value and try again."
-                                );
+                        if let Some(cas) = cas
+                            && previous.seq() != cas
+                        {
+                            debug!(
+                                ?target,
+                                ?requester_id,
+                                ?from,
+                                "CAS mismatched, re-read value and try again."
+                            );
 
-                                return Some(MessageType::Error(ErrorSpecific {
-                                    code: 301,
-                                    description: "CAS mismatched, re-read value and try again."
-                                        .to_string(),
-                                }));
-                            }
+                            return Some(MessageType::Error(ErrorSpecific {
+                                code: 301,
+                                description: "CAS mismatched, re-read value and try again."
+                                    .to_string(),
+                            }));
                         };
 
                         if seq < previous.seq() {

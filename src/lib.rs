@@ -19,20 +19,18 @@ mod core;
 mod dht;
 
 pub use common::{
-    messages::{MessageType, PutRequestSpecific, RequestSpecific},
-    ClosestNodes, Id, MutableItem, Node, RoutingTable,
+    ClosestNodes, Id, MutableItem, Node,
+    messages::{PutRequestSpecific, RequestSpecific},
 };
-pub use core::server::{RequestFilter, ServerSettings, MAX_INFO_HASHES, MAX_PEERS, MAX_VALUES};
-pub use dht::{Dht, DhtBuilder, GetStream, Testnet};
+pub use core::server::{RequestFilter, ServerSettings};
+pub use dht::{ActorShutdown, Dht, DhtBuilder, GetStream, Testnet};
 
 pub use ed25519_dalek::SigningKey;
 
 pub mod errors {
     //! Exported errors
-    pub use super::common::ErrorSpecific;
     pub use super::core::{ConcurrencyError, PutError, PutQueryError};
     pub use super::dht::PutMutableError;
 
     pub use super::common::DecodeIdError;
-    pub use super::common::MutableError;
 }

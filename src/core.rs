@@ -11,8 +11,8 @@ use iterative_query::IterativeQuery;
 use put_query::PutQuery;
 
 use crate::common::{
-    Id, Node, PutMutableRequestArguments, RequestTypeSpecific, RoutingTable, SignedAnnounce,
-    MAX_BUCKET_SIZE_K,
+    Id, MAX_BUCKET_SIZE_K, Node, PutMutableRequestArguments, RequestTypeSpecific, RoutingTable,
+    SignedAnnounce,
 };
 use crate::core::iterative_query::GetRequestSpecific;
 use crate::{MutableItem, PutRequestSpecific};
@@ -34,7 +34,7 @@ pub const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const MAX_CACHED_ITERATIVE_QUERIES: usize = 1000;
 
 pub const VERSION: [u8; 4] = [82, 83, 0, 6]; // "RS" version 06
-                                             //
+//
 pub const VERSIONS_SUPPORTING_SIGNED_PEERS: &[[u8; 4]] = &[
     // This node
     VERSION,
@@ -136,7 +136,7 @@ impl Core {
         let self_id = self.id();
         let table_size = self.routing_table.size();
 
-        let closest_nodes = if let RequestTypeSpecific::FindNode(_) = query.request.request_type {
+        if let RequestTypeSpecific::FindNode(_) = query.request.request_type {
             if query.target() == *self_id {
                 if !self.bootstrap.is_empty() && table_size == 0 {
                     error!("Could not bootstrap the routing table");
@@ -172,9 +172,7 @@ impl Core {
                 )
                 .to_vec()
                 .into_boxed_slice()
-        };
-
-        closest_nodes
+        }
     }
 
     /// Remove done [IterativeQuery]s, return the [Id]s of [PutQuery] ready to start,
@@ -239,33 +237,31 @@ impl Core {
             target,
             ..
         }) = request
-        {
-            if let Some(PutRequestSpecific::PutMutable(inflight_request)) = self
+            && let Some(PutRequestSpecific::PutMutable(inflight_request)) = self
                 .put_queries
                 .get(target)
                 .map(|existing| &existing.request)
-            {
-                debug!(?inflight_request, ?request, "Possible conflict risk");
+        {
+            debug!(?inflight_request, ?request, "Possible conflict risk");
 
-                if *sig == inflight_request.sig {
-                    // Noop, the inflight query is sufficient.
-                    return Ok(());
-                } else if *seq < inflight_request.seq {
-                    return Err(ConcurrencyError::NotMostRecent)?;
-                } else if let Some(cas) = cas {
-                    if *cas == inflight_request.seq {
-                        // The user is aware of the inflight query and whiches to overrides it.
-                        //
-                        // Remove the inflight request, and create a new one.
-                        self.put_queries.remove(target);
-                    } else {
-                        return Err(ConcurrencyError::CasFailed)?;
-                    }
+            if *sig == inflight_request.sig {
+                // Noop, the inflight query is sufficient.
+                return Ok(());
+            } else if *seq < inflight_request.seq {
+                return Err(ConcurrencyError::NotMostRecent)?;
+            } else if let Some(cas) = cas {
+                if *cas == inflight_request.seq {
+                    // The user is aware of the inflight query and whiches to overrides it.
+                    //
+                    // Remove the inflight request, and create a new one.
+                    self.put_queries.remove(target);
                 } else {
-                    return Err(ConcurrencyError::ConflictRisk)?;
-                };
+                    return Err(ConcurrencyError::CasFailed)?;
+                }
+            } else {
+                return Err(ConcurrencyError::ConflictRisk)?;
             };
-        }
+        };
 
         Ok(())
     }
