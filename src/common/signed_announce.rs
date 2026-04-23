@@ -1,7 +1,6 @@
 //! Helper functions and structs for announcing signed peers.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use iroh_base::SecretKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::{convert::TryFrom, time::SystemTime};
 
@@ -23,18 +22,18 @@ pub struct SignedAnnounce {
 
 impl SignedAnnounce {
     /// Create a new SignedAnnounce for a info_hash.
-    pub fn new(signer: &SecretKey, info_hash: &Id) -> Self {
+    pub fn new(signer: &SigningKey, info_hash: &Id) -> Self {
         let timestamp = system_time();
 
         Self::new_with_timestamp(signer, info_hash, timestamp)
     }
 
-    pub(crate) fn new_with_timestamp(signer: &SecretKey, info_hash: &Id, timestamp: u64) -> Self {
+    pub(crate) fn new_with_timestamp(signer: &SigningKey, info_hash: &Id, timestamp: u64) -> Self {
         let signable = encode_signable(info_hash, timestamp);
         let signature = signer.sign(&signable);
 
         Self {
-            key: signer.public().as_bytes().to_owned(),
+            key: signer.verifying_key().as_bytes().to_owned(),
             timestamp,
             signature: signature.to_bytes(),
         }
@@ -138,13 +137,15 @@ pub enum SignedAnnounceError {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
 
     #[test]
     fn more_than_time_tolerance() {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
-        let signer = SecretKey::from_bytes(&secret_key);
+        rand::rng().fill_bytes(&mut secret_key);
+        let signer = SigningKey::from_bytes(&secret_key);
 
         let info_hash = Id::random();
 
@@ -178,8 +179,8 @@ mod tests {
     #[test]
     fn invalid_signature() {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
-        let signer = SecretKey::from_bytes(&secret_key);
+        rand::rng().fill_bytes(&mut secret_key);
+        let signer = SigningKey::from_bytes(&secret_key);
 
         let info_hash = Id::random();
 

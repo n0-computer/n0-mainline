@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use n0_mainline::{Dht, MutableItem, SecretKey};
+use n0_mainline::{Dht, MutableItem, SigningKey};
 
 use clap::Parser;
 
@@ -26,12 +26,16 @@ async fn main() {
 
     let dht = Dht::client().await.unwrap();
 
-    let signer: SecretKey = cli.secret_key.parse().expect("Invalid secret key");
+    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)
+        .expect("Invalid secret key")
+        .try_into()
+        .expect("secret key must be 32 bytes");
+    let signer = SigningKey::from_bytes(&secret_bytes);
 
     println!(
         "\nStoring mutable data: \"{}\" for public_key: {}  ...",
         cli.value,
-        to_hex(signer.public().as_bytes())
+        hex::encode(signer.verifying_key().as_bytes())
     );
 
     println!("\n=== COLD QUERY ===");
@@ -41,11 +45,11 @@ async fn main() {
     put(&dht, &signer, cli.value.as_bytes(), None).await;
 }
 
-async fn put(dht: &Dht, signer: &SecretKey, value: &[u8], salt: Option<&[u8]>) {
+async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
     let start = Instant::now();
 
     let (item, cas) = if let Some(most_recent) = dht
-        .get_mutable_most_recent(signer.public().as_bytes(), salt)
+        .get_mutable_most_recent(signer.verifying_key().as_bytes(), salt)
         .await
     {
         let mut new_value = most_recent.value().to_vec();
@@ -74,11 +78,7 @@ async fn put(dht: &Dht, signer: &SecretKey, value: &[u8], salt: Option<&[u8]>) {
 
     println!(
         "Stored mutable data as {:?} in {:?} milliseconds",
-        to_hex(signer.public().as_bytes()),
+        hex::encode(signer.verifying_key().as_bytes()),
         start.elapsed().as_millis()
     );
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
 }

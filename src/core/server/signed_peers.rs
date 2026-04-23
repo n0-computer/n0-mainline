@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 use crate::common::{Id, SignedAnnounce};
 
 use lru::LruCache;
+use rand::Rng;
 
 const CHANCE_SCALE: f32 = 2.0 * (1u32 << 31) as f32;
 
@@ -58,7 +59,7 @@ impl SignedPeersStore {
             let mut results = Vec::with_capacity(20);
 
             let mut chunk = vec![0_u8; info_hash_lru.iter().len() * 4];
-            getrandom::fill(chunk.as_mut_slice()).expect("getrandom");
+            rand::rng().fill_bytes(chunk.as_mut_slice());
 
             for (index, (_, signed_announce)) in info_hash_lru.iter().enumerate() {
                 // Calculate the chance of adding the current item based on remaining items and slots
@@ -89,17 +90,17 @@ impl SignedPeersStore {
 
 #[cfg(test)]
 mod test {
-    use iroh_base::SecretKey;
+    use ed25519_dalek::SigningKey;
 
     use super::*;
 
-    fn make_signer() -> SecretKey {
+    fn make_signer() -> SigningKey {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
-        SecretKey::from_bytes(&secret_key)
+        rand::rng().fill_bytes(&mut secret_key);
+        SigningKey::from_bytes(&secret_key)
     }
 
-    fn make_peer(signer: &SecretKey, target: &Id) -> SignedAnnounce {
+    fn make_peer(signer: &SigningKey, target: &Id) -> SignedAnnounce {
         SignedAnnounce::new(signer, target)
     }
 
@@ -146,8 +147,8 @@ mod test {
                 .map(|p| p.key())
                 .collect::<Vec<_>>(),
             vec![
-                signer3.public().as_bytes(),
-                signer2.public().as_bytes()
+                signer3.verifying_key().as_bytes(),
+                signer2.verifying_key().as_bytes()
             ]
         );
     }

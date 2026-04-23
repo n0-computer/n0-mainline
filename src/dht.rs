@@ -5,8 +5,8 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use ed25519_dalek::SigningKey;
 use futures_core::Stream;
-use iroh_base::SecretKey;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -122,9 +122,7 @@ impl Dht {
 
         tokio::spawn(crate::actor::run(config, receiver));
 
-        check_rx
-            .await
-            .expect("actor task unexpectedly shutdown")?;
+        check_rx.await.expect("actor task unexpectedly shutdown")?;
 
         Ok(Dht(sender))
     }
@@ -205,7 +203,8 @@ impl Dht {
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv().await
+        rx.recv()
+            .await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -235,7 +234,11 @@ impl Dht {
     /// The peer will be announced on this process IP.
     /// If explicit port is passed, it will be used, otherwise the port will be implicitly
     /// assumed by remote nodes to be the same ase port they received the request from.
-    pub async fn announce_peer(&self, info_hash: Id, port: Option<u16>) -> Result<Id, PutQueryError> {
+    pub async fn announce_peer(
+        &self,
+        info_hash: Id,
+        port: Option<u16>,
+    ) -> Result<Id, PutQueryError> {
         let (port, implied_port) = match port {
             Some(port) => (port, None),
             None => (0, Some(true)),
@@ -275,7 +278,7 @@ impl Dht {
     pub async fn announce_signed_peer(
         &self,
         info_hash: Id,
-        signer: &SecretKey,
+        signer: &SigningKey,
     ) -> Result<Id, PutQueryError> {
         let signed_announce = SignedAnnounce::new(signer, &info_hash);
 
@@ -433,13 +436,13 @@ impl Dht {
     /// then start authoring the new [MutableItem] based on the most recent as in the following example:
     ///
     ///```rust,ignore
-    /// use dht::{Dht, MutableItem, SecretKey, Testnet};
+    /// use dht::{Dht, MutableItem, SigningKey, Testnet};
     ///
     /// let testnet = Testnet::new(3).await.unwrap();
     /// let dht = Dht::builder().bootstrap(&testnet.bootstrap).build().await.unwrap();
     ///
-    /// let secret_key = SecretKey::from_bytes(&[0; 32]);
-    /// let key = secret_key.public().to_bytes();
+    /// let secret_key = SigningKey::from_bytes(&[0; 32]);
+    /// let key = secret_key.verifying_key().to_bytes();
     /// let salt = Some(b"salt".as_ref());
     ///
     /// let (item, cas) = if let Some(most_recent) = dht .get_mutable_most_recent(&key, salt).await {
@@ -471,7 +474,11 @@ impl Dht {
     ///
     /// If you are lucky to get one of these errors (which is not guaranteed), then you should
     /// read the most recent item again, and repeat the steps in the previous example.
-    pub async fn put_mutable(&self, item: MutableItem, cas: Option<i64>) -> Result<Id, PutMutableError> {
+    pub async fn put_mutable(
+        &self,
+        item: MutableItem,
+        cas: Option<i64>,
+    ) -> Result<Id, PutMutableError> {
         let request = PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, cas));
 
         self.put(request, None).await.map_err(|error| match error {
@@ -497,7 +504,8 @@ impl Dht {
             ResponseSender::ClosestNodes(tx),
         ));
 
-        rx.recv().await
+        rx.recv()
+            .await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -518,7 +526,8 @@ impl Dht {
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Put(request, tx, extra_nodes));
 
-        rx.recv().await
+        rx.recv()
+            .await
             .expect("Query was dropped before sending a response, please open an issue.")
     }
 
@@ -559,8 +568,9 @@ pub enum PutMutableError {
 mod test {
     use std::{str::FromStr, time::Duration};
 
-    use iroh_base::SecretKey;
+    use ed25519_dalek::SigningKey;
     use futures::StreamExt;
+    use rand::Rng;
 
     use crate::core::ConcurrencyError;
 
@@ -575,8 +585,8 @@ mod test {
 
         let dht = Dht::client().await.unwrap();
 
-        let signer = SecretKey::generate();
-        let key = *signer.public().as_bytes();
+        let signer = SigningKey::from_bytes(&rand::random());
+        let key = *signer.verifying_key().as_bytes();
         let value = b"hello from n0-mainline test";
 
         let item = MutableItem::new(&signer, value, 1, None);
@@ -686,7 +696,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -699,7 +709,7 @@ mod test {
         a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
-            .get_mutable(signer.public().as_bytes(), None, None)
+            .get_mutable(signer.verifying_key().as_bytes(), None, None)
             .next()
             .await
             .expect("No mutable values");
@@ -722,7 +732,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -735,7 +745,7 @@ mod test {
         a.put_mutable(item.clone(), None).await.unwrap();
 
         let response = b
-            .get_mutable(signer.public().as_bytes(), None, Some(seq))
+            .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
             .next()
             .await;
 
@@ -772,12 +782,12 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
 
-        let key = *signer.public().as_bytes();
+        let key = *signer.verifying_key().as_bytes();
         let seq = 1000;
         let value = b"Hello World!";
 
@@ -810,7 +820,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -822,10 +832,7 @@ mod test {
             let (tx, _rx) = mpsc::unbounded_channel();
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
-            client
-                .0
-                .send(ActorMessage::Put(request, tx, None))
-                .unwrap();
+            client.0.send(ActorMessage::Put(request, tx, None)).unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -854,7 +861,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -865,7 +872,9 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(&signer, &[], 1000, None), None).await,
+            client
+                .put_mutable(MutableItem::new(&signer, &[], 1000, None), None)
+                .await,
             Err(PutMutableError::Concurrency(
                 ConcurrencyError::NotMostRecent
             ))
@@ -882,7 +891,7 @@ mod test {
             .await
             .unwrap();
 
-        let signer = SecretKey::from_bytes(&[
+        let signer = SigningKey::from_bytes(&[
             56, 171, 62, 85, 105, 58, 155, 209, 189, 8, 59, 109, 137, 84, 84, 201, 221, 115, 7,
             228, 127, 70, 4, 204, 182, 64, 77, 98, 92, 215, 27, 103,
         ]);
@@ -893,7 +902,9 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            client.put_mutable(MutableItem::new(&signer, &[], 1002, None), Some(1000)).await,
+            client
+                .put_mutable(MutableItem::new(&signer, &[], 1002, None), Some(1000))
+                .await,
             Err(PutMutableError::Concurrency(ConcurrencyError::CasFailed))
         ));
     }
@@ -943,14 +954,14 @@ mod test {
             .iter()
             .map(|_| {
                 let mut secret_key = [0; 32];
-                getrandom::fill(&mut secret_key).unwrap();
-                SecretKey::from_bytes(&secret_key)
+                rand::rng().fill_bytes(&mut secret_key);
+                SigningKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();
 
         let mut expected_keys = signers
             .iter()
-            .map(|s| s.public().as_bytes().to_vec())
+            .map(|s| s.verifying_key().as_bytes().to_vec())
             .collect::<Vec<_>>();
         expected_keys.sort();
 
@@ -960,7 +971,11 @@ mod test {
                 .expect("failed to announce");
         }
 
-        let peers = b.get_signed_peers(info_hash).next().await.expect("No peers");
+        let peers = b
+            .get_signed_peers(info_hash)
+            .next()
+            .await
+            .expect("No peers");
 
         let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
         keys.sort();
@@ -976,14 +991,14 @@ mod test {
             .iter()
             .map(|_| {
                 let mut secret_key = [0; 32];
-                getrandom::fill(&mut secret_key).unwrap();
-                SecretKey::from_bytes(&secret_key)
+                rand::rng().fill_bytes(&mut secret_key);
+                SigningKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();
 
         let mut expected_keys = signers
             .iter()
-            .map(|s| s.public().as_bytes().to_vec())
+            .map(|s| s.verifying_key().as_bytes().to_vec())
             .collect::<Vec<_>>();
         expected_keys.sort();
 
@@ -997,12 +1012,17 @@ mod test {
                 .build()
                 .await
                 .unwrap();
-            assert!(a.announce_signed_peer(info_hash, &signers[0]).await.is_err());
+            assert!(a
+                .announce_signed_peer(info_hash, &signers[0])
+                .await
+                .is_err());
             assert_eq!(a.get_signed_peers(info_hash).next().await, None)
         }
 
         {
-            let testnet_new = Testnet::new_with_bootstrap(3, &testnet_legacy.bootstrap).await.unwrap();
+            let testnet_new = Testnet::new_with_bootstrap(3, &testnet_legacy.bootstrap)
+                .await
+                .unwrap();
 
             let bootstrap = testnet_new.bootstrap;
 
@@ -1015,7 +1035,11 @@ mod test {
                     .expect("failed to announce");
             }
 
-            let peers = b.get_signed_peers(info_hash).next().await.expect("No peers");
+            let peers = b
+                .get_signed_peers(info_hash)
+                .next()
+                .await
+                .expect("No peers");
 
             let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
             keys.sort();

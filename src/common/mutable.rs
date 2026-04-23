@@ -1,7 +1,6 @@
 //! Helper functions and structs for mutable items.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use iroh_base::SecretKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha1_smol::Sha1;
 use std::convert::TryFrom;
@@ -30,12 +29,12 @@ pub struct MutableItem {
 
 impl MutableItem {
     /// Create a new mutable item from a signing key, value, sequence number and optional salt.
-    pub fn new(signer: &SecretKey, value: &[u8], seq: i64, salt: Option<&[u8]>) -> Self {
+    pub fn new(signer: &SigningKey, value: &[u8], seq: i64, salt: Option<&[u8]>) -> Self {
         let signable = encode_signable(seq, value, salt);
         let signature = signer.sign(&signable);
 
         Self::new_signed_unchecked(
-            signer.public().as_bytes().to_owned(),
+            signer.verifying_key().as_bytes().to_owned(),
             signature.to_bytes(),
             value,
             seq,

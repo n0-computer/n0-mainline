@@ -70,8 +70,7 @@ impl UdpIo {
         loop {
             self.socket.writable().await?;
             match self.socket.try_io(Interest::WRITABLE, || {
-                self.state
-                    .send((&self.socket).into(), &transmit)
+                self.state.send((&self.socket).into(), &transmit)
             }) {
                 Ok(()) => return Ok(()),
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
@@ -388,11 +387,7 @@ impl KrpcSocket {
     }
 
     /// Encode a message and queue it for sending.
-    fn enqueue(
-        &mut self,
-        address: SocketAddrV4,
-        message: Message,
-    ) -> Result<(), SendMessageError> {
+    fn enqueue(&mut self, address: SocketAddrV4, message: Message) -> Result<(), SendMessageError> {
         let bytes = message.to_bytes()?;
         trace!(context = "socket_message_sending", message = ?message);
         self.outbox.push_back((bytes, SocketAddr::from(address)));
@@ -656,8 +651,7 @@ mod test {
         let client_address = client.local_addr();
 
         let mut server = KrpcSocket::client().await.unwrap();
-        let server_address =
-            SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
+        let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
 
         let responder_id = Id::random();
         let response = ResponseSpecific::Ping(PingResponseArguments { responder_id });
@@ -712,11 +706,7 @@ mod test {
         client.flush().await;
 
         // Use a timeout to avoid hanging - recv should not return a valid response
-        let result = tokio::time::timeout(
-            Duration::from_millis(50),
-            server.recv_from(),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_millis(50), server.recv_from()).await;
 
         assert!(
             result.is_err() || result.unwrap().is_none(),

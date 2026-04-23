@@ -1,6 +1,6 @@
 use std::{str::FromStr, time::Instant};
 
-use n0_mainline::{Dht, Id, SecretKey};
+use n0_mainline::{Dht, Id, SigningKey};
 
 use clap::Parser;
 
@@ -32,11 +32,15 @@ async fn main() {
 
     let dht = Dht::client().await.unwrap();
 
-    let signer: SecretKey = cli.secret_key.parse().expect("Invalid secret key");
+    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)
+        .expect("Invalid secret key")
+        .try_into()
+        .expect("secret key must be 32 bytes");
+    let signer = SigningKey::from_bytes(&secret_bytes);
 
     println!(
         "\nAnnouncing signed peer {} on an infohash: {} ...\n",
-        to_hex(signer.public().as_bytes()),
+        hex::encode(signer.verifying_key().as_bytes()),
         cli.infohash,
     );
 
@@ -47,7 +51,7 @@ async fn main() {
     announce(&dht, info_hash, &signer).await;
 }
 
-async fn announce(dht: &Dht, info_hash: Id, signer: &SecretKey) {
+async fn announce(dht: &Dht, info_hash: Id, signer: &SigningKey) {
     let start = Instant::now();
 
     dht.announce_signed_peer(info_hash, signer)
@@ -58,8 +62,4 @@ async fn announce(dht: &Dht, info_hash: Id, signer: &SecretKey) {
         "Announced peer in {:?} seconds",
         start.elapsed().as_secs_f32()
     );
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
