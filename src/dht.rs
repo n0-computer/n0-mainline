@@ -28,20 +28,14 @@ pub use testnet::Testnet;
 /// Capacity of the actor inbox channel.
 const ACTOR_INBOX_CAPACITY: usize = 256;
 
+#[n0_error::stack_error(derive)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 /// Error returned when the DHT actor task has shut down.
 ///
 /// All [Dht] handles are still usable but every method will return this error
 /// until the handles are dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[error("DHT actor task has shut down")]
 pub struct ActorShutdown;
-
-impl std::fmt::Display for ActorShutdown {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DHT actor task has shut down")
-    }
-}
-
-impl std::error::Error for ActorShutdown {}
 
 impl From<ActorShutdown> for io::Error {
     fn from(_: ActorShutdown) -> Self {
