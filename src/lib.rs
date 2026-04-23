@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(n0_mainline_docsrs, feature(doc_cfg))]
 #![deny(missing_docs, unused_must_use)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(

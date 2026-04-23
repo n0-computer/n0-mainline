@@ -298,6 +298,7 @@ impl Dht {
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
     #[cfg(feature = "unstable_signed_peers")]
+    #[cfg_attr(n0_mainline_docsrs, doc(cfg(feature = "unstable_signed_peers")))]
     pub async fn announce_signed_peer(
         &self,
         info_hash: Id,
@@ -339,6 +340,7 @@ impl Dht {
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
     #[cfg(feature = "unstable_signed_peers")]
+    #[cfg_attr(n0_mainline_docsrs, doc(cfg(feature = "unstable_signed_peers")))]
     pub async fn get_signed_peers(
         &self,
         info_hash: Id,

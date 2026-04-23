@@ -52,6 +52,16 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--cfg", "n0_mainline_docsrs"]
+
+# We use this --cfg for documenting the cargo features on which an API
+# is available. To preview locally use:
+#   RUSTDOCFLAGS="--cfg n0_mainline_docsrs" cargo +nightly doc --all-features
+# We use our own n0_mainline_docsrs instead of the common docsrs to avoid also
+# enabling this feature in any dependencies, because some indirect dependencies
+# require a feature enabled when using `--cfg docsrs`, which we cannot do.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(n0_mainline_docsrs)"] }
 
 [[example]]
 name = "announce_signed_peer"
