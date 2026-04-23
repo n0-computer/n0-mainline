@@ -88,7 +88,7 @@ impl EstimateResult {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -104,7 +104,7 @@ async fn main() {
     );
 
     // Initialize the DHT client.
-    let dht = Dht::client().await.expect("Failed to create DHT client");
+    let dht = Dht::client().await?;
 
     // Collect samples from the DHT.
     let (marked_sample, recapture_sample) =
@@ -116,6 +116,8 @@ async fn main() {
     } else {
         println!("Unable to calculate the DHT size estimate due to insufficient overlap.");
     }
+
+    Ok(())
 }
 
 async fn collect_samples(
@@ -145,7 +147,7 @@ async fn collect_samples(
             let dht = dht.clone();
             let marked = marked_sample.clone();
             mark_handles.push(tokio::spawn(async move {
-                for node in dht.find_node(random_id).await.iter() {
+                for node in dht.find_node(random_id).await.unwrap().iter() {
                     marked.insert(*node.id());
                 }
             }));
@@ -157,7 +159,7 @@ async fn collect_samples(
             let dht = dht.clone();
             let recaptured = recapture_sample.clone();
             recap_handles.push(tokio::spawn(async move {
-                for node in dht.find_node(random_id).await.iter() {
+                for node in dht.find_node(random_id).await.unwrap().iter() {
                     recaptured.insert(*node.id());
                 }
             }));

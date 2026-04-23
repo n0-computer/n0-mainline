@@ -25,9 +25,27 @@ mod testnet;
 
 pub use testnet::Testnet;
 
+/// Capacity of the actor inbox channel.
+const ACTOR_INBOX_CAPACITY: usize = 256;
+
+#[n0_error::stack_error(derive)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+/// Error returned when the DHT actor task has shut down.
+///
+/// All [Dht] handles are still usable but every method will return this error
+/// until the handles are dropped.
+#[error("DHT actor task has shut down")]
+pub struct ActorShutdown;
+
+impl From<ActorShutdown> for io::Error {
+    fn from(_: ActorShutdown) -> Self {
+        io::Error::other("DHT actor task has shut down")
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Mainline Dht node.
-pub struct Dht(pub(crate) mpsc::UnboundedSender<ActorMessage>);
+pub struct Dht(pub(crate) mpsc::Sender<ActorMessage>);
 
 #[derive(Debug, Default, Clone)]
 /// A builder for the [Dht] node.
@@ -113,16 +131,20 @@ impl Dht {
     /// Could return an error if it failed to bind to the specified
     /// port or other io errors while binding the udp socket.
     pub async fn new(config: Config) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(ACTOR_INBOX_CAPACITY);
 
         let (check_tx, check_rx) = oneshot::channel();
+        // The receiver is still owned locally, so this send cannot fail.
         sender
             .send(ActorMessage::Check(check_tx))
-            .expect("receiver not dropped");
+            .await
+            .expect("receiver alive until spawn");
 
         tokio::spawn(crate::actor::run(config, receiver));
 
-        check_rx.await.expect("actor task unexpectedly shutdown")?;
+        check_rx
+            .await
+            .map_err(|_| io::Error::other("DHT actor task did not respond during init"))??;
 
         Ok(Dht(sender))
     }
@@ -153,19 +175,19 @@ impl Dht {
     // === Getters ===
 
     /// Information and statistics about this [Dht] node.
-    pub async fn info(&self) -> Info {
+    pub async fn info(&self) -> Result<Info, ActorShutdown> {
         let (tx, rx) = oneshot::channel();
-        self.send(ActorMessage::Info(tx));
+        self.send(ActorMessage::Info(tx)).await?;
 
-        rx.await.expect("actor task unexpectedly shutdown")
+        rx.await.map_err(|_| ActorShutdown)
     }
 
     /// Turn this node's routing table to a list of bootstrapping nodes.
-    pub async fn to_bootstrap(&self) -> Vec<String> {
+    pub async fn to_bootstrap(&self) -> Result<Vec<String>, ActorShutdown> {
         let (tx, rx) = oneshot::channel();
-        self.send(ActorMessage::ToBootstrap(tx));
+        self.send(ActorMessage::ToBootstrap(tx)).await?;
 
-        rx.await.expect("actor task unexpectedly shutdown")
+        rx.await.map_err(|_| ActorShutdown)
     }
 
     // === Public Methods ===
@@ -173,12 +195,12 @@ impl Dht {
     /// Await until the bootstrapping query is done.
     ///
     /// Returns true if the bootstrapping was successful.
-    pub async fn bootstrapped(&self) -> bool {
-        let info = self.info().await;
-        self.find_node(*info.id()).await;
+    pub async fn bootstrapped(&self) -> Result<bool, ActorShutdown> {
+        let info = self.info().await?;
+        self.find_node(*info.id()).await?;
 
-        let info = self.info().await;
-        info.routing_table_size() > 0
+        let info = self.info().await?;
+        Ok(info.routing_table_size() > 0)
     }
 
     // === Find nodes ===
@@ -196,16 +218,15 @@ impl Dht {
     /// If you are trying to find the closest nodes to a target with intent to [Self::put],
     /// a request directly to these nodes (using `extra_nodes` parameter), then you should
     /// use [Self::get_closest_nodes] instead.
-    pub async fn find_node(&self, target: Id) -> Box<[Node]> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    pub async fn find_node(&self, target: Id) -> Result<Box<[Node]>, ActorShutdown> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             ResponseSender::ClosestNodes(tx),
-        ));
+        ))
+        .await?;
 
-        rx.recv()
-            .await
-            .expect("Query was dropped before sending a response, please open an issue.")
+        rx.await.map_err(|_| ActorShutdown)
     }
 
     // === Peers ===
@@ -219,14 +240,18 @@ impl Dht {
     /// for Bittorrent is that any peer will introduce you to more peers through "peer exchange"
     /// so if you are implementing something different from Bittorrent, you might want
     /// to implement your own logic for gossipping more peers after you discover the first ones.
-    pub fn get_peers(&self, info_hash: Id) -> GetStream<Vec<SocketAddrV4>> {
+    pub async fn get_peers(
+        &self,
+        info_hash: Id,
+    ) -> Result<GetStream<Vec<SocketAddrV4>>, ActorShutdown> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::Peers(tx),
-        ));
+        ))
+        .await?;
 
-        GetStream(rx)
+        Ok(GetStream(rx))
     }
 
     /// Announce a peer for a given infohash.
@@ -253,12 +278,7 @@ impl Dht {
             None,
         )
         .await
-        .map_err(|error| match error {
-            PutError::Query(error) => error,
-            PutError::Concurrency(_) => {
-                unreachable!("should not receive a concurrency error from announce peer query")
-            }
-        })
+        .map_err(put_error_to_query_error)
     }
 
     // === Signed Peers ===
@@ -292,12 +312,7 @@ impl Dht {
             None,
         )
         .await
-        .map_err(|error| match error {
-            PutError::Query(error) => error,
-            PutError::Concurrency(_) => {
-                unreachable!("should not receive a concurrency error from announce peer query")
-            }
-        })
+        .map_err(put_error_to_query_error)
     }
 
     /// Get peers verifiably announced for a given infohash by their public key.
@@ -320,31 +335,37 @@ impl Dht {
     /// to implement your own logic for gossipping more peers after you discover the first ones.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    pub fn get_signed_peers(&self, info_hash: Id) -> GetStream<Vec<SignedAnnounce>> {
+    pub async fn get_signed_peers(
+        &self,
+        info_hash: Id,
+    ) -> Result<GetStream<Vec<SignedAnnounce>>, ActorShutdown> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetSignedPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::SignedPeers(tx),
-        ));
+        ))
+        .await?;
 
-        GetStream(rx)
+        Ok(GetStream(rx))
     }
 
     // === Immutable data ===
 
     /// Get an Immutable data by its sha1 hash.
-    pub async fn get_immutable(&self, target: Id) -> Option<Box<[u8]>> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    pub async fn get_immutable(&self, target: Id) -> Result<Option<Box<[u8]>>, ActorShutdown> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
                 seq: None,
                 salt: None,
             }),
-            ResponseSender::Immutable(tx),
-        ));
+            ResponseSender::Immutable(Some(tx)),
+        ))
+        .await?;
 
-        rx.recv().await
+        // Sender dropped without sending → query completed without finding a value.
+        Ok(rx.await.ok())
     }
 
     /// Put an immutable data to the DHT.
@@ -359,12 +380,7 @@ impl Dht {
             None,
         )
         .await
-        .map_err(|error| match error {
-            PutError::Query(error) => error,
-            PutError::Concurrency(_) => {
-                unreachable!("should not receive a concurrency error from put immutable query")
-            }
-        })
+        .map_err(put_error_to_query_error)
     }
 
     // === Mutable data ===
@@ -381,12 +397,12 @@ impl Dht {
     /// more recent than earlier ones.
     ///
     /// Consider using [Self::get_mutable_most_recent] if that is what you need.
-    pub fn get_mutable(
+    pub async fn get_mutable(
         &self,
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
         more_recent_than: Option<i64>,
-    ) -> GetStream<MutableItem> {
+    ) -> Result<GetStream<MutableItem>, ActorShutdown> {
         let salt = salt.map(|s| s.into());
         let target = MutableItem::target_from_key(public_key, salt.as_deref());
         let (tx, rx) = mpsc::unbounded_channel();
@@ -397,9 +413,10 @@ impl Dht {
                 salt,
             }),
             ResponseSender::Mutable(tx),
-        ));
+        ))
+        .await?;
 
-        GetStream(rx)
+        Ok(GetStream(rx))
     }
 
     /// Get the most recent [MutableItem] from the network.
@@ -407,9 +424,9 @@ impl Dht {
         &self,
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
-    ) -> Option<MutableItem> {
+    ) -> Result<Option<MutableItem>, ActorShutdown> {
         let mut most_recent: Option<MutableItem> = None;
-        let mut stream = self.get_mutable(public_key, salt, None);
+        let mut stream = self.get_mutable(public_key, salt, None).await?;
 
         while let Some(item) = stream.0.recv().await {
             if let Some(mr) = &most_recent {
@@ -421,7 +438,7 @@ impl Dht {
             }
         }
 
-        most_recent
+        Ok(most_recent)
     }
 
     /// Put a mutable data to the DHT.
@@ -493,8 +510,8 @@ impl Dht {
     ///
     /// Useful to [Self::put] a request to nodes further from the 20 closest nodes to the
     /// [PutRequestSpecific::target]. Which itself is useful to circumvent [extreme vertical sybil attacks](https://github.com/nuhvi/mainline/blob/main/docs/censorship-resistance.md#extreme-vertical-sybil-attacks).
-    pub async fn get_closest_nodes(&self, target: Id) -> Box<[Node]> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    pub async fn get_closest_nodes(&self, target: Id) -> Result<Box<[Node]>, ActorShutdown> {
+        let (tx, rx) = oneshot::channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetValue(GetValueRequestArguments {
                 target,
@@ -502,11 +519,10 @@ impl Dht {
                 seq: None,
             }),
             ResponseSender::ClosestNodes(tx),
-        ));
+        ))
+        .await?;
 
-        rx.recv()
-            .await
-            .expect("Query was dropped before sending a response, please open an issue.")
+        rx.await.map_err(|_| ActorShutdown)
     }
 
     /// Send a PUT request to the closest nodes, and optionally some extra nodes.
@@ -523,20 +539,26 @@ impl Dht {
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
     ) -> Result<Id, PutError> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        self.send(ActorMessage::Put(request, tx, extra_nodes));
+        let (tx, rx) = oneshot::channel();
+        self.send(ActorMessage::Put(request, tx, extra_nodes))
+            .await?;
 
-        rx.recv()
-            .await
-            .expect("Query was dropped before sending a response, please open an issue.")
+        rx.await.map_err(|_| ActorShutdown)?
     }
 
     // === Private Methods ===
 
-    fn send(&self, message: ActorMessage) {
-        self.0
-            .send(message)
-            .expect("actor task unexpectedly shutdown");
+    async fn send(&self, message: ActorMessage) -> Result<(), ActorShutdown> {
+        self.0.send(message).await.map_err(|_| ActorShutdown)
+    }
+}
+
+fn put_error_to_query_error(error: PutError) -> PutQueryError {
+    match error {
+        PutError::Query(error) => error,
+        PutError::Concurrency(_) => {
+            unreachable!("should not receive a concurrency error from this query type")
+        }
     }
 }
 
@@ -562,6 +584,24 @@ pub enum PutMutableError {
     #[error(transparent)]
     /// PutQuery for [crate::MutableItem] errors
     Concurrency(ConcurrencyError),
+}
+
+impl From<ActorShutdown> for PutMutableError {
+    fn from(_: ActorShutdown) -> Self {
+        PutMutableError::Query(PutQueryError::Shutdown)
+    }
+}
+
+impl From<ActorShutdown> for PutQueryError {
+    fn from(_: ActorShutdown) -> Self {
+        PutQueryError::Shutdown
+    }
+}
+
+impl From<ActorShutdown> for PutError {
+    fn from(_: ActorShutdown) -> Self {
+        PutError::Query(PutQueryError::Shutdown)
+    }
 }
 
 #[cfg(test)]
@@ -595,6 +635,8 @@ mod test {
 
         let response = dht
             .get_mutable(&key, None, None)
+            .await
+            .unwrap()
             .next()
             .await
             .expect("should resolve mutable item from real DHT");
@@ -607,7 +649,7 @@ mod test {
     async fn bind_twice() {
         let a = Dht::client().await.unwrap();
         let result = Dht::builder()
-            .port(a.info().await.local_addr().port())
+            .port(a.info().await.unwrap().local_addr().port())
             .server_mode()
             .build()
             .await;
@@ -636,7 +678,13 @@ mod test {
             .await
             .expect("failed to announce");
 
-        let peers = b.get_peers(info_hash).next().await.expect("No peers");
+        let peers = b
+            .get_peers(info_hash)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .expect("No peers");
 
         assert_eq!(peers.first().unwrap().port(), 45555);
     }
@@ -662,7 +710,7 @@ mod test {
         let target = a.put_immutable(value).await.unwrap();
         assert_eq!(target, expected_target);
 
-        let response = b.get_immutable(target).await.unwrap();
+        let response = b.get_immutable(target).await.unwrap().unwrap();
 
         assert_eq!(response, value.to_vec().into_boxed_slice());
     }
@@ -671,14 +719,14 @@ mod test {
     async fn find_node_no_values() {
         let client = Dht::builder().no_bootstrap().build().await.unwrap();
 
-        client.find_node(Id::random()).await;
+        client.find_node(Id::random()).await.unwrap();
     }
 
     #[tokio::test]
     async fn put_get_immutable_no_values() {
         let client = Dht::builder().no_bootstrap().build().await.unwrap();
 
-        assert_eq!(client.get_immutable(Id::random()).await, None);
+        assert_eq!(client.get_immutable(Id::random()).await.unwrap(), None);
     }
 
     #[tokio::test]
@@ -710,6 +758,8 @@ mod test {
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, None)
+            .await
+            .unwrap()
             .next()
             .await
             .expect("No mutable values");
@@ -746,6 +796,8 @@ mod test {
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
+            .await
+            .unwrap()
             .next()
             .await;
 
@@ -797,12 +849,16 @@ mod test {
 
         let _response_first = b
             .get_mutable(&key, None, None)
+            .await
+            .unwrap()
             .next()
             .await
             .expect("No mutable values");
 
         let response_second = b
             .get_mutable(&key, None, None)
+            .await
+            .unwrap()
             .next()
             .await
             .expect("No mutable values");
@@ -829,10 +885,14 @@ mod test {
         {
             let item = MutableItem::new(&signer, &[], 1000, None);
 
-            let (tx, _rx) = mpsc::unbounded_channel();
+            let (tx, _rx) = oneshot::channel();
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
-            client.0.send(ActorMessage::Put(request, tx, None)).unwrap();
+            client
+                .0
+                .send(ActorMessage::Put(request, tx, None))
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -841,7 +901,10 @@ mod test {
         {
             let item = MutableItem::new(&signer, &[], 1001, None);
 
-            let most_recent = client.get_mutable_most_recent(item.key(), None).await;
+            let most_recent = client
+                .get_mutable_most_recent(item.key(), None)
+                .await
+                .unwrap();
 
             if let Some(cas) = most_recent.map(|item| item.seq()) {
                 client.put_mutable(item, Some(cas)).await.unwrap();
@@ -916,7 +979,7 @@ mod test {
         let testnet = Testnet::new(size).await.unwrap();
 
         for n in &testnet.nodes {
-            assert_eq!(n.to_bootstrap().await.len(), size - 1);
+            assert_eq!(n.to_bootstrap().await.unwrap().len(), size - 1);
         }
     }
 
@@ -930,7 +993,7 @@ mod test {
             .await
             .unwrap();
 
-        assert!(client.bootstrapped().await);
+        assert!(client.bootstrapped().await.unwrap());
     }
 
     #[tokio::test]
@@ -973,6 +1036,8 @@ mod test {
 
         let peers = b
             .get_signed_peers(info_hash)
+            .await
+            .unwrap()
             .next()
             .await
             .expect("No peers");
@@ -1016,7 +1081,10 @@ mod test {
                 .announce_signed_peer(info_hash, &signers[0])
                 .await
                 .is_err());
-            assert_eq!(a.get_signed_peers(info_hash).next().await, None)
+            assert_eq!(
+                a.get_signed_peers(info_hash).await.unwrap().next().await,
+                None
+            )
         }
 
         {
@@ -1037,6 +1105,8 @@ mod test {
 
             let peers = b
                 .get_signed_peers(info_hash)
+                .await
+                .unwrap()
                 .next()
                 .await
                 .expect("No peers");

@@ -12,7 +12,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -22,28 +22,30 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let info_hash = Id::from_str(cli.infohash.as_str()).expect("invalid infohash");
+    let info_hash = Id::from_str(cli.infohash.as_str())?;
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
     println!("\nAnnouncing peer on an infohash: {} ...\n", cli.infohash);
 
     println!("\n=== COLD QUERY ===");
-    announce(&dht, info_hash).await;
+    announce(&dht, info_hash).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    announce(&dht, info_hash).await;
+    announce(&dht, info_hash).await?;
+
+    Ok(())
 }
 
-async fn announce(dht: &Dht, info_hash: Id) {
+async fn announce(dht: &Dht, info_hash: Id) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    dht.announce_peer(info_hash, Some(6991))
-        .await
-        .expect("announce_peer failed");
+    dht.announce_peer(info_hash, Some(6991)).await?;
 
     println!(
         "Announced peer in {:?} seconds",
         start.elapsed().as_secs_f32()
     );
+
+    Ok(())
 }

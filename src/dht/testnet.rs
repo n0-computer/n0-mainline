@@ -21,7 +21,7 @@ impl Testnet {
         let testnet = Testnet::new_inner(count, false, None).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped().await;
+            node.bootstrapped().await?;
         }
 
         Ok(testnet)
@@ -32,7 +32,7 @@ impl Testnet {
         let testnet = Testnet::new_inner(count, true, None).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped().await;
+            node.bootstrapped().await?;
         }
 
         Ok(testnet)
@@ -46,7 +46,7 @@ impl Testnet {
         let testnet = Testnet::new_inner(count, false, Some(bootstrap.to_vec())).await?;
 
         for node in &testnet.nodes {
-            node.bootstrapped().await;
+            node.bootstrapped().await?;
         }
 
         Ok(testnet)
@@ -71,7 +71,7 @@ impl Testnet {
             let node = builder.server_mode().bootstrap(&bootstrap).build().await?;
 
             if i == 0 {
-                let info = node.info().await;
+                let info = node.info().await?;
                 let addr = info.local_addr();
 
                 bootstrap.push(format!("127.0.0.1:{}", addr.port()));

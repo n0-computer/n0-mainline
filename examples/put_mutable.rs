@@ -14,7 +14,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,12 +24,11 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
-    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)
-        .expect("Invalid secret key")
+    let secret_bytes: [u8; 32] = hex::decode(&cli.secret_key)?
         .try_into()
-        .expect("secret key must be 32 bytes");
+        .map_err(|_| anyhow::anyhow!("secret key must be 32 bytes"))?;
     let signer = SigningKey::from_bytes(&secret_bytes);
 
     println!(
@@ -39,18 +38,25 @@ async fn main() {
     );
 
     println!("\n=== COLD QUERY ===");
-    put(&dht, &signer, cli.value.as_bytes(), None).await;
+    put(&dht, &signer, cli.value.as_bytes(), None).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    put(&dht, &signer, cli.value.as_bytes(), None).await;
+    put(&dht, &signer, cli.value.as_bytes(), None).await?;
+
+    Ok(())
 }
 
-async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) {
+async fn put(
+    dht: &Dht,
+    signer: &SigningKey,
+    value: &[u8],
+    salt: Option<&[u8]>,
+) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let (item, cas) = if let Some(most_recent) = dht
         .get_mutable_most_recent(signer.verifying_key().as_bytes(), salt)
-        .await
+        .await?
     {
         let mut new_value = most_recent.value().to_vec();
 
@@ -74,11 +80,13 @@ async fn put(dht: &Dht, signer: &SigningKey, value: &[u8], salt: Option<&[u8]>) 
         (MutableItem::new(signer, value, 1, salt), None)
     };
 
-    dht.put_mutable(item, cas).await.unwrap();
+    dht.put_mutable(item, cas).await?;
 
     println!(
         "Stored mutable data as {:?} in {:?} milliseconds",
         hex::encode(signer.verifying_key().as_bytes()),
         start.elapsed().as_millis()
     );
+
+    Ok(())
 }

@@ -37,6 +37,7 @@ histo = "1.0.0"
 rayon = "1.10"
 dashmap = "6.1"
 colored = "3.0.0"
+anyhow = "1"
 chrono = "0.4"
 hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread"] }

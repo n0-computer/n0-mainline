@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use n0_mainline::Dht;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -28,13 +28,15 @@ async fn main() {
     // this way you don't rely on default bootstrap nodes.
     builder.extra_bootstrap(&cached_nodes);
 
-    let client = builder.build().await.unwrap();
+    let client = builder.build().await?;
 
-    client.bootstrapped().await;
+    client.bootstrapped().await?;
 
-    let bootstrap = client.to_bootstrap().await;
+    let bootstrap = client.to_bootstrap().await?;
 
-    save(bootstrap)
+    save(bootstrap);
+
+    Ok(())
 }
 
 fn load() -> Vec<String> {

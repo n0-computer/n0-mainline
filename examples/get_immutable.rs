@@ -12,7 +12,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -22,29 +22,30 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let info_hash = Id::from_str(cli.target.as_str()).expect("Invalid info_hash");
+    let info_hash = Id::from_str(cli.target.as_str())?;
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
     println!("\nLooking up immutable data: {} ...\n", cli.target);
 
     println!("\n=== COLD QUERY ===");
-    get_immutable(&dht, info_hash).await;
+    get_immutable(&dht, info_hash).await?;
 
     println!("\n=== SUBSEQUENT QUERY ===");
-    get_immutable(&dht, info_hash).await;
+    get_immutable(&dht, info_hash).await?;
+
+    Ok(())
 }
 
-async fn get_immutable(dht: &Dht, info_hash: Id) {
+async fn get_immutable(dht: &Dht, info_hash: Id) -> anyhow::Result<()> {
     let start = Instant::now();
 
     let value = dht
         .get_immutable(info_hash)
-        .await
-        .expect("Failed to find the immutable value for the provided info_hash");
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no immutable value found for the provided info_hash"))?;
 
-    let string = String::from_utf8(value.to_vec())
-        .expect("expected immutable data to be valid utf-8 for this demo");
+    let string = String::from_utf8(value.to_vec())?;
 
     println!(
         "Got result in {:?} milliseconds\n",
@@ -57,4 +58,6 @@ async fn get_immutable(dht: &Dht, info_hash: Id) {
         "\nQuery exhausted in {:?} milliseconds",
         start.elapsed().as_millis(),
     );
+
+    Ok(())
 }

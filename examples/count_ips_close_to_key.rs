@@ -42,7 +42,7 @@ const MAX_DISTANCE: u8 = 150; // Health check to not include outrageously distan
 const USE_RANDOM_BOOTSTRAP_NODES: bool = false;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -69,8 +69,8 @@ async fn main() {
     let mut lookup_count = 0;
     while rx_interrupted.try_recv().is_err() {
         lookup_count += 1;
-        let dht = init_dht(USE_RANDOM_BOOTSTRAP_NODES).await;
-        let nodes = dht.find_node(target).await;
+        let dht = init_dht(USE_RANDOM_BOOTSTRAP_NODES).await?;
+        let nodes = dht.find_node(target).await?;
         let nodes: Box<[Node]> = nodes
             .iter()
             .filter(|node| target.distance(node.id()) < MAX_DISTANCE)
@@ -119,6 +119,8 @@ async fn main() {
     println!();
     println!("Histogram");
     print_histogram(ip_hits, lookup_count);
+
+    Ok(())
 }
 
 fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
@@ -138,22 +140,21 @@ fn print_histogram(hits: HashMap<Ipv4Addr, u16>, lookup_count: usize) {
     println!("{}", histogram);
 }
 
-async fn get_random_boostrap_nodes2() -> Vec<String> {
-    let dht = Dht::client().await.unwrap();
-    let nodes = dht.find_node(Id::random()).await;
+async fn get_random_boostrap_nodes2() -> anyhow::Result<Vec<String>> {
+    let dht = Dht::client().await?;
+    let nodes = dht.find_node(Id::random()).await?;
     let addrs = nodes
         .iter()
         .map(|node| node.address().to_string())
         .collect::<Box<[_]>>();
-    let slice: Vec<String> = addrs[..8].to_vec();
-    slice
+    Ok(addrs[..8].to_vec())
 }
 
-async fn init_dht(use_random_boostrap_nodes: bool) -> Dht {
+async fn init_dht(use_random_boostrap_nodes: bool) -> anyhow::Result<Dht> {
     if use_random_boostrap_nodes {
-        let bootstrap = get_random_boostrap_nodes2().await;
-        Dht::builder().bootstrap(&bootstrap).build().await.unwrap()
+        let bootstrap = get_random_boostrap_nodes2().await?;
+        Ok(Dht::builder().bootstrap(&bootstrap).build().await?)
     } else {
-        Dht::client().await.unwrap()
+        Ok(Dht::client().await?)
     }
 }

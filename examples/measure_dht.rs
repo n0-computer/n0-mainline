@@ -1,7 +1,7 @@
 use n0_mainline::{Dht, Id};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -9,14 +9,14 @@ async fn main() {
         )
         .init();
 
-    let dht = Dht::client().await.unwrap();
+    let dht = Dht::client().await?;
 
     println!("Calculating Dht size by sampling random lookup queries..",);
 
     for lookups in 1.. {
         let _ = dht.find_node(Id::random()).await;
 
-        let info = dht.info().await;
+        let info = dht.info().await?;
         let (estimate, std_dev) = info.dht_size_estimate();
 
         println!(
@@ -29,6 +29,8 @@ async fn main() {
         // we don't need to pace ourselves anymore, as the krpc socket
         // does that on its own now...
     }
+
+    Ok(())
 }
 
 fn format_number(num: usize) -> String {
