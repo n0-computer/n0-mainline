@@ -390,7 +390,7 @@ impl Actor {
 }
 
 /// Async event loop for the actor.
-pub(crate) async fn run(config: Config, mut receiver: mpsc::UnboundedReceiver<ActorMessage>) {
+pub(crate) async fn run(config: Config, mut receiver: mpsc::Receiver<ActorMessage>) {
     match Actor::new(config).await {
         Ok(mut actor) => {
             // Maintenance interval

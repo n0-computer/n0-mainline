@@ -48,7 +48,7 @@ async fn get_peers(dht: &Dht, info_hash: &Id) {
 
     let mut peers = HashSet::new();
 
-    let mut stream = dht.get_signed_peers(*info_hash);
+    let mut stream = dht.get_signed_peers(*info_hash).await;
     while let Some(response) = stream.next().await {
         if !first {
             first = true;

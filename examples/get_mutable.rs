@@ -58,7 +58,7 @@ async fn main() {
 
 async fn get_first(dht: &Dht, public_key: &[u8; 32]) {
     let start = Instant::now();
-    if let Some(item) = dht.get_mutable(public_key, None, None).next().await {
+    if let Some(item) = dht.get_mutable(public_key, None, None).await.next().await {
         println!(
             "\nGot first result in {:?} milliseconds:",
             start.elapsed().as_millis()

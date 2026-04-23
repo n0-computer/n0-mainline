@@ -25,9 +25,12 @@ mod testnet;
 
 pub use testnet::Testnet;
 
+/// Capacity of the actor inbox channel.
+const ACTOR_INBOX_CAPACITY: usize = 256;
+
 #[derive(Debug, Clone)]
 /// Mainline Dht node.
-pub struct Dht(pub(crate) mpsc::UnboundedSender<ActorMessage>);
+pub struct Dht(pub(crate) mpsc::Sender<ActorMessage>);
 
 #[derive(Debug, Default, Clone)]
 /// A builder for the [Dht] node.
@@ -113,11 +116,12 @@ impl Dht {
     /// Could return an error if it failed to bind to the specified
     /// port or other io errors while binding the udp socket.
     pub async fn new(config: Config) -> io::Result<Self> {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(ACTOR_INBOX_CAPACITY);
 
         let (check_tx, check_rx) = oneshot::channel();
         sender
             .send(ActorMessage::Check(check_tx))
+            .await
             .expect("receiver not dropped");
 
         tokio::spawn(crate::actor::run(config, receiver));
@@ -155,7 +159,7 @@ impl Dht {
     /// Information and statistics about this [Dht] node.
     pub async fn info(&self) -> Info {
         let (tx, rx) = oneshot::channel();
-        self.send(ActorMessage::Info(tx));
+        self.send(ActorMessage::Info(tx)).await;
 
         rx.await.expect("actor task unexpectedly shutdown")
     }
@@ -163,7 +167,7 @@ impl Dht {
     /// Turn this node's routing table to a list of bootstrapping nodes.
     pub async fn to_bootstrap(&self) -> Vec<String> {
         let (tx, rx) = oneshot::channel();
-        self.send(ActorMessage::ToBootstrap(tx));
+        self.send(ActorMessage::ToBootstrap(tx)).await;
 
         rx.await.expect("actor task unexpectedly shutdown")
     }
@@ -201,7 +205,8 @@ impl Dht {
         self.send(ActorMessage::Get(
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             ResponseSender::ClosestNodes(tx),
-        ));
+        ))
+        .await;
 
         rx.recv()
             .await
@@ -219,12 +224,13 @@ impl Dht {
     /// for Bittorrent is that any peer will introduce you to more peers through "peer exchange"
     /// so if you are implementing something different from Bittorrent, you might want
     /// to implement your own logic for gossipping more peers after you discover the first ones.
-    pub fn get_peers(&self, info_hash: Id) -> GetStream<Vec<SocketAddrV4>> {
+    pub async fn get_peers(&self, info_hash: Id) -> GetStream<Vec<SocketAddrV4>> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::Peers(tx),
-        ));
+        ))
+        .await;
 
         GetStream(rx)
     }
@@ -320,12 +326,13 @@ impl Dht {
     /// to implement your own logic for gossipping more peers after you discover the first ones.
     ///
     /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    pub fn get_signed_peers(&self, info_hash: Id) -> GetStream<Vec<SignedAnnounce>> {
+    pub async fn get_signed_peers(&self, info_hash: Id) -> GetStream<Vec<SignedAnnounce>> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.send(ActorMessage::Get(
             GetRequestSpecific::GetSignedPeers(GetPeersRequestArguments { info_hash }),
             ResponseSender::SignedPeers(tx),
-        ));
+        ))
+        .await;
 
         GetStream(rx)
     }
@@ -342,7 +349,8 @@ impl Dht {
                 salt: None,
             }),
             ResponseSender::Immutable(tx),
-        ));
+        ))
+        .await;
 
         rx.recv().await
     }
@@ -381,7 +389,7 @@ impl Dht {
     /// more recent than earlier ones.
     ///
     /// Consider using [Self::get_mutable_most_recent] if that is what you need.
-    pub fn get_mutable(
+    pub async fn get_mutable(
         &self,
         public_key: &[u8; 32],
         salt: Option<&[u8]>,
@@ -397,7 +405,8 @@ impl Dht {
                 salt,
             }),
             ResponseSender::Mutable(tx),
-        ));
+        ))
+        .await;
 
         GetStream(rx)
     }
@@ -409,7 +418,7 @@ impl Dht {
         salt: Option<&[u8]>,
     ) -> Option<MutableItem> {
         let mut most_recent: Option<MutableItem> = None;
-        let mut stream = self.get_mutable(public_key, salt, None);
+        let mut stream = self.get_mutable(public_key, salt, None).await;
 
         while let Some(item) = stream.0.recv().await {
             if let Some(mr) = &most_recent {
@@ -502,7 +511,8 @@ impl Dht {
                 seq: None,
             }),
             ResponseSender::ClosestNodes(tx),
-        ));
+        ))
+        .await;
 
         rx.recv()
             .await
@@ -524,7 +534,7 @@ impl Dht {
         extra_nodes: Option<Box<[Node]>>,
     ) -> Result<Id, PutError> {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        self.send(ActorMessage::Put(request, tx, extra_nodes));
+        self.send(ActorMessage::Put(request, tx, extra_nodes)).await;
 
         rx.recv()
             .await
@@ -533,9 +543,10 @@ impl Dht {
 
     // === Private Methods ===
 
-    fn send(&self, message: ActorMessage) {
+    async fn send(&self, message: ActorMessage) {
         self.0
             .send(message)
+            .await
             .expect("actor task unexpectedly shutdown");
     }
 }
@@ -595,6 +606,7 @@ mod test {
 
         let response = dht
             .get_mutable(&key, None, None)
+            .await
             .next()
             .await
             .expect("should resolve mutable item from real DHT");
@@ -636,7 +648,7 @@ mod test {
             .await
             .expect("failed to announce");
 
-        let peers = b.get_peers(info_hash).next().await.expect("No peers");
+        let peers = b.get_peers(info_hash).await.next().await.expect("No peers");
 
         assert_eq!(peers.first().unwrap().port(), 45555);
     }
@@ -710,6 +722,7 @@ mod test {
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, None)
+            .await
             .next()
             .await
             .expect("No mutable values");
@@ -746,6 +759,7 @@ mod test {
 
         let response = b
             .get_mutable(signer.verifying_key().as_bytes(), None, Some(seq))
+            .await
             .next()
             .await;
 
@@ -797,12 +811,14 @@ mod test {
 
         let _response_first = b
             .get_mutable(&key, None, None)
+            .await
             .next()
             .await
             .expect("No mutable values");
 
         let response_second = b
             .get_mutable(&key, None, None)
+            .await
             .next()
             .await
             .expect("No mutable values");
@@ -832,7 +848,11 @@ mod test {
             let (tx, _rx) = mpsc::unbounded_channel();
             let request =
                 PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
-            client.0.send(ActorMessage::Put(request, tx, None)).unwrap();
+            client
+                .0
+                .send(ActorMessage::Put(request, tx, None))
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -973,6 +993,7 @@ mod test {
 
         let peers = b
             .get_signed_peers(info_hash)
+            .await
             .next()
             .await
             .expect("No peers");
@@ -1016,7 +1037,7 @@ mod test {
                 .announce_signed_peer(info_hash, &signers[0])
                 .await
                 .is_err());
-            assert_eq!(a.get_signed_peers(info_hash).next().await, None)
+            assert_eq!(a.get_signed_peers(info_hash).await.next().await, None)
         }
 
         {
@@ -1037,6 +1058,7 @@ mod test {
 
             let peers = b
                 .get_signed_peers(info_hash)
+                .await
                 .next()
                 .await
                 .expect("No peers");
