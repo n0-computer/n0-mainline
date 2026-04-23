@@ -561,6 +561,7 @@ mod test {
 
     use iroh_base::SecretKey;
     use futures::StreamExt;
+    use rand::Rng;
 
     use crate::core::ConcurrencyError;
 
@@ -943,7 +944,7 @@ mod test {
             .iter()
             .map(|_| {
                 let mut secret_key = [0; 32];
-                getrandom::fill(&mut secret_key).unwrap();
+                rand::rng().fill_bytes(&mut secret_key);
                 SecretKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();
@@ -976,7 +977,7 @@ mod test {
             .iter()
             .map(|_| {
                 let mut secret_key = [0; 32];
-                getrandom::fill(&mut secret_key).unwrap();
+                rand::rng().fill_bytes(&mut secret_key);
                 SecretKey::from_bytes(&secret_key)
             })
             .collect::<Vec<_>>();

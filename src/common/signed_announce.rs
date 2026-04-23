@@ -138,12 +138,14 @@ pub enum SignedAnnounceError {
 
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
 
     #[test]
     fn more_than_time_tolerance() {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
+        rand::rng().fill_bytes(&mut secret_key);
         let signer = SecretKey::from_bytes(&secret_key);
 
         let info_hash = Id::random();
@@ -178,7 +180,7 @@ mod tests {
     #[test]
     fn invalid_signature() {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
+        rand::rng().fill_bytes(&mut secret_key);
         let signer = SecretKey::from_bytes(&secret_key);
 
         let info_hash = Id::random();

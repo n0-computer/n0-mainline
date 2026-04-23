@@ -5,6 +5,7 @@ use std::num::NonZeroUsize;
 use crate::common::{Id, SignedAnnounce};
 
 use lru::LruCache;
+use rand::Rng;
 
 const CHANCE_SCALE: f32 = 2.0 * (1u32 << 31) as f32;
 
@@ -58,7 +59,7 @@ impl SignedPeersStore {
             let mut results = Vec::with_capacity(20);
 
             let mut chunk = vec![0_u8; info_hash_lru.iter().len() * 4];
-            getrandom::fill(chunk.as_mut_slice()).expect("getrandom");
+            rand::rng().fill_bytes(chunk.as_mut_slice());
 
             for (index, (_, signed_announce)) in info_hash_lru.iter().enumerate() {
                 // Calculate the chance of adding the current item based on remaining items and slots
@@ -95,7 +96,7 @@ mod test {
 
     fn make_signer() -> SecretKey {
         let mut secret_key = [0; 32];
-        getrandom::fill(&mut secret_key).unwrap();
+        rand::rng().fill_bytes(&mut secret_key);
         SecretKey::from_bytes(&secret_key)
     }
 
