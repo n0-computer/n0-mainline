@@ -240,19 +240,6 @@ pub enum PutQueryError {
 #[derive(Clone)]
 /// PutQuery for [crate::MutableItem] errors
 pub enum ConcurrencyError {
-    /// Trying to PUT mutable items with the same `key`, and `salt` but different `seq`.
-    ///
-    /// Moreover, the more recent item does _NOT_ mention the the earlier
-    /// item's `seq` in its `cas` field.
-    ///
-    /// This risks a [Lost Update Problem](https://en.wikipedia.org/wiki/Write-write_conflict).
-    ///
-    /// Try reading most recent mutable item before writing again,
-    /// and make sure to set the `cas` field.
-    #[deprecated(note = "No longer emitted by n0-mainline; retained for API compatibility.")]
-    #[error("Conflict risk, try reading most recent item before writing again.")]
-    ConflictRisk,
-
     /// The [crate::MutableItem::seq] is less than or equal the sequence from another signed item.
     ///
     /// Try reading most recent mutable item before writing again.
