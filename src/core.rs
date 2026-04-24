@@ -247,8 +247,22 @@ impl Core {
             if *sig == inflight_request.sig {
                 // Noop, the inflight query is sufficient.
                 return Ok(());
-            } else if *seq < inflight_request.seq {
+            } else if *seq <= inflight_request.seq {
+                // this is a bit unclear in the spec. https://www.bittorrent.org/beps/bep_0044.html
+                //
+                // "a node hosting the list node MUST not downgrade a list head from a higher sequence number to a lower one, only upgrade"
+                // Must not downgrade is clear, but it seems to say that equal is also not allowed.
+                //
+                // I checked in libtorrent. What it does is that if it gets the same seq, it just refreshes the old value. This would lead
+                // to the weird situation where you think you have put a new value, but just refreshed the old one. So in this case we don't
+                // allow this at all.
+                //
+                // Note that publishing the same value with the same signature is still allowed.
                 return Err(ConcurrencyError::NotMostRecent)?;
+            } else if cas.is_none() {
+                // For unconditional puts (`cas: None`), accept the new request as long as
+                // it is not older than the in-flight request.
+                self.put_queries.remove(target);
             } else if let Some(cas) = cas {
                 if *cas == inflight_request.seq {
                     // The user is aware of the inflight query and whiches to overrides it.
@@ -258,8 +272,6 @@ impl Core {
                 } else {
                     return Err(ConcurrencyError::CasFailed)?;
                 }
-            } else {
-                return Err(ConcurrencyError::ConflictRisk)?;
             };
         };
 

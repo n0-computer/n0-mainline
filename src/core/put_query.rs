@@ -249,6 +249,7 @@ pub enum ConcurrencyError {
     ///
     /// Try reading most recent mutable item before writing again,
     /// and make sure to set the `cas` field.
+    #[deprecated(note = "No longer emitted by n0-mainline; retained for API compatibility.")]
     #[error("Conflict risk, try reading most recent item before writing again.")]
     ConflictRisk,
 
