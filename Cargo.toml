@@ -1,6 +1,6 @@
 [package]
 name = "n0-mainline"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["n0 team", "Ruediger Klaehn <rklaehn@protonmail.com>", "nuh.dev"]
 edition = "2024"
 rust-version = "1.89"
