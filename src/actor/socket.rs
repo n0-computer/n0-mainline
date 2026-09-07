@@ -126,9 +126,31 @@ pub struct KrpcSocket {
     inflight_requests: InflightRequests,
     /// Outgoing packets queued by sync send methods.
     outbox: VecDeque<(Vec<u8>, SocketAddr)>,
+    datagram_hooks: Vec<(u64, DatagramFilter)>,
+    next_datagram_hook: u64,
 
     #[cfg(test)]
     version: [u8; 4],
+}
+
+type DatagramFilterFn = dyn FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static;
+
+pub(crate) struct DatagramFilter(Box<DatagramFilterFn>);
+
+impl DatagramFilter {
+    pub(crate) fn new(filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static) -> Self {
+        Self(Box::new(filter))
+    }
+
+    fn accept(&mut self, bytes: &[u8], from: SocketAddrV4) -> bool {
+        (self.0)(bytes, from)
+    }
+}
+
+impl Debug for DatagramFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramFilter(..)")
+    }
 }
 
 impl KrpcSocket {
@@ -155,6 +177,8 @@ impl KrpcSocket {
             inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
+            datagram_hooks: Vec::new(),
+            next_datagram_hook: 0,
 
             #[cfg(test)]
             version: if config.disable_announce_signed_peers {
@@ -243,6 +267,22 @@ impl KrpcSocket {
         }
     }
 
+    pub(crate) fn send_datagram(&mut self, bytes: Box<[u8]>, address: SocketAddrV4) {
+        self.outbox.push_back((bytes.into_vec(), address.into()));
+    }
+
+    pub(crate) fn add_datagram_hook(&mut self, filter: DatagramFilter) -> u64 {
+        let id = self.next_datagram_hook;
+        self.next_datagram_hook = self.next_datagram_hook.wrapping_add(1);
+        self.datagram_hooks.push((id, filter));
+        id
+    }
+
+    pub(crate) fn remove_datagram_hook(&mut self, id: u64) {
+        self.datagram_hooks
+            .retain(|(candidate, _)| *candidate != id);
+    }
+
     /// Async receive: waits for a datagram and returns a parsed KRPC message.
     pub async fn recv_from(&mut self) -> Option<(Message, SocketAddrV4)> {
         let mut buf = [0u8; MTU];
@@ -258,6 +298,14 @@ impl KrpcSocket {
                         context = "socket_validation",
                         message = "Response from port 0"
                     );
+                    return None;
+                }
+
+                if self
+                    .datagram_hooks
+                    .iter_mut()
+                    .any(|(_, hook)| hook.accept(bytes, from))
+                {
                     return None;
                 }
 
@@ -641,6 +689,31 @@ mod test {
         assert!(message.read_only, "Read-only should be true");
         assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
         assert_eq!(message.message_type, MessageType::Request(expected_request));
+    }
+
+    #[tokio::test]
+    async fn datagram_filter_runs_before_krpc_decode() {
+        let mut server = KrpcSocket::server().unwrap();
+        let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
+        server.add_datagram_hook(DatagramFilter::new(move |bytes, from| {
+            let _ = sender.try_send((Box::from(bytes), from));
+            true
+        }));
+
+        let mut client = KrpcSocket::client().unwrap();
+        client.request(
+            server_address,
+            RequestSpecific {
+                requester_id: Id::random(),
+                request_type: RequestTypeSpecific::Ping,
+            },
+        );
+        client.flush().await;
+
+        assert!(server.recv_from().await.is_none());
+        let (bytes, _) = receiver.recv().await.unwrap();
+        assert!(Message::from_bytes(&bytes).is_ok());
     }
 
     #[tokio::test]

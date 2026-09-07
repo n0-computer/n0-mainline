@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 #[allow(unused_imports)]
 use crate::{
     Node, ServerSettings,
-    actor::{ActorMessage, Info, ResponseSender, config::Config},
+    actor::{ActorMessage, Info, ResponseSender, config::Config, socket::DatagramFilter},
     common::{
         AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, FindNodeRequestArguments,
         GetPeersRequestArguments, GetValueRequestArguments, Id, MutableItem,
@@ -42,6 +42,23 @@ pub struct ActorShutdown;
 impl From<ActorShutdown> for io::Error {
     fn from(_: ActorShutdown) -> Self {
         io::Error::other("DHT actor task has shut down")
+    }
+}
+
+/// Registration for a synchronous incoming UDP datagram hook.
+///
+/// Dropping the guard unregisters the hook.
+#[derive(Debug)]
+pub struct DatagramHookGuard {
+    sender: mpsc::Sender<ActorMessage>,
+    id: u64,
+}
+
+impl Drop for DatagramHookGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .sender
+            .try_send(ActorMessage::RemoveDatagramHook(self.id));
     }
 }
 
@@ -185,6 +202,39 @@ impl Dht {
     }
 
     // === Public Methods ===
+
+    /// Add a synchronous filter hook for incoming IPv4 UDP datagrams.
+    ///
+    /// Hooks run in registration order before KRPC decoding. Returning `true`
+    /// consumes the packet and prevents later hooks and the KRPC decoder from
+    /// seeing it. The hook must not block; it can use `try_send` to hand accepted
+    /// packets to a caller-owned queue.
+    pub async fn add_datagram_hook(
+        &self,
+        filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static,
+    ) -> Result<DatagramHookGuard, ActorShutdown> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.send(ActorMessage::AddDatagramHook(
+            DatagramFilter::new(filter),
+            response_tx,
+        ))
+        .await?;
+        let id = response_rx.await.map_err(|_| ActorShutdown)?;
+        Ok(DatagramHookGuard {
+            sender: self.0.clone(),
+            id,
+        })
+    }
+
+    /// Send an opaque datagram from the DHT node's UDP socket.
+    pub async fn send_datagram(
+        &self,
+        bytes: impl Into<Box<[u8]>>,
+        to: SocketAddrV4,
+    ) -> Result<(), ActorShutdown> {
+        self.send(ActorMessage::SendDatagram(bytes.into(), to))
+            .await
+    }
 
     /// Await until the bootstrapping query is done.
     ///
@@ -604,7 +654,11 @@ impl From<ActorShutdown> for PutError {
 
 #[cfg(test)]
 mod test {
-    use std::{str::FromStr, time::Duration};
+    use std::{
+        net::{Ipv4Addr, SocketAddrV4},
+        str::FromStr,
+        time::Duration,
+    };
 
     use ed25519_dalek::SigningKey;
     use futures::StreamExt;
@@ -614,6 +668,41 @@ mod test {
     use crate::core::ConcurrencyError;
 
     use super::*;
+
+    #[tokio::test]
+    async fn non_krpc_datagrams_share_the_dht_socket() {
+        let dht = Dht::builder().no_bootstrap().port(0).build().unwrap();
+        let (sender, mut receiver) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
+        let _hook = dht
+            .add_datagram_hook(move |bytes, from| {
+                if !bytes.starts_with(&[0]) {
+                    return false;
+                }
+                let _ = sender.try_send((Box::from(bytes), from));
+                true
+            })
+            .await
+            .unwrap();
+
+        let peer = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let dht_addr = SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            dht.info().await.unwrap().local_addr().port(),
+        );
+        peer.send_to(&[0, 1, 2, 3], dht_addr).await.unwrap();
+
+        let (bytes, from) = receiver.recv().await.unwrap();
+        assert_eq!(&*bytes, &[0, 1, 2, 3]);
+        assert_eq!(from.port(), peer.local_addr().unwrap().port());
+
+        dht.send_datagram([4, 5, 6].as_slice(), from).await.unwrap();
+        let mut buf = [0; 16];
+        let (len, response_from) = peer.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], &[4, 5, 6]);
+        assert_eq!(response_from.port(), dht_addr.port());
+    }
 
     #[tokio::test]
     #[ignore = "hits the real mainline DHT; run with --ignored"]

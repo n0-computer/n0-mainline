@@ -19,7 +19,7 @@ use crate::core::{
     Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
 
-use socket::KrpcSocket;
+use socket::{DatagramFilter, KrpcSocket};
 
 pub use info::Info;
 
@@ -437,6 +437,16 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                         ActorMessage::ToBootstrap(sender) => {
                             let _ = sender.send(actor.to_bootstrap());
                         }
+                        ActorMessage::AddDatagramHook(filter, response) => {
+                            let id = actor.socket.add_datagram_hook(filter);
+                            let _ = response.send(id);
+                        }
+                        ActorMessage::RemoveDatagramHook(id) => {
+                            actor.socket.remove_datagram_hook(id);
+                        }
+                        ActorMessage::SendDatagram(bytes, to) => {
+                            actor.socket.send_datagram(bytes, to);
+                        }
                     },
                     None => {
                         // All senders dropped, shutdown.
@@ -490,6 +500,9 @@ pub(crate) enum ActorMessage {
     ),
     Get(GetRequestSpecific, ResponseSender),
     ToBootstrap(oneshot::Sender<Vec<String>>),
+    AddDatagramHook(DatagramFilter, oneshot::Sender<u64>),
+    RemoveDatagramHook(u64),
+    SendDatagram(Box<[u8]>, SocketAddrV4),
 }
 
 /// Sender side for streaming GET query results back to the caller.

@@ -24,7 +24,7 @@ pub use common::{
     messages::{PutRequestSpecific, RequestSpecific},
 };
 pub use core::server::{RequestFilter, ServerSettings};
-pub use dht::{ActorShutdown, Dht, DhtBuilder, GetStream, Testnet};
+pub use dht::{ActorShutdown, DatagramHookGuard, Dht, DhtBuilder, GetStream, Testnet};
 
 pub use ed25519_dalek::SigningKey;
 
