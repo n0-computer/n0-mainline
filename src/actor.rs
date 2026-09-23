@@ -497,7 +497,7 @@ pub(crate) enum ActorMessage {
     Get(GetRequestSpecific, ResponseSender),
     ToBootstrap(oneshot::Sender<Vec<String>>),
     SetDatagramHook(Option<DatagramHook>),
-    SendDatagram(Box<[u8]>, SocketAddrV4),
+    SendDatagram(Vec<u8>, SocketAddrV4),
 }
 
 /// Sender side for streaming GET query results back to the caller.

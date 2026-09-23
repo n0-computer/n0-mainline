@@ -267,8 +267,8 @@ impl KrpcSocket {
         }
     }
 
-    pub(crate) fn send_datagram(&mut self, bytes: Box<[u8]>, address: SocketAddrV4) {
-        self.outbox.push_back((bytes.into_vec(), address.into()));
+    pub(crate) fn send_datagram(&mut self, bytes: Vec<u8>, address: SocketAddrV4) {
+        self.outbox.push_back((bytes, address.into()));
     }
 
     pub(crate) fn set_datagram_hook(&mut self, hook: Option<DatagramHook>) {

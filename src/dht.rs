@@ -199,11 +199,10 @@ impl Dht {
     /// Send an opaque datagram from the DHT node's UDP socket.
     pub async fn send_datagram(
         &self,
-        bytes: impl Into<Box<[u8]>>,
+        bytes: Vec<u8>,
         to: SocketAddrV4,
     ) -> Result<(), ActorShutdown> {
-        self.send(ActorMessage::SendDatagram(bytes.into(), to))
-            .await
+        self.send(ActorMessage::SendDatagram(bytes, to)).await
     }
 
     /// Await until the bootstrapping query is done.
@@ -666,7 +665,7 @@ mod test {
         assert_eq!(&*bytes, &[0, 1, 2, 3]);
         assert_eq!(from.port(), peer.local_addr().unwrap().port());
 
-        dht.send_datagram([4, 5, 6].as_slice(), from).await.unwrap();
+        dht.send_datagram(vec![4, 5, 6], from).await.unwrap();
         let mut buf = [0; 16];
         let (len, response_from) = peer.recv_from(&mut buf).await.unwrap();
         assert_eq!(&buf[..len], &[4, 5, 6]);
