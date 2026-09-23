@@ -10,7 +10,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
-use crate::MutableItem;
 use crate::common::{
     FindNodeRequestArguments, Id, Message, MessageType, Node, PutRequestSpecific, RequestSpecific,
     RequestTypeSpecific, SignedAnnounce,
@@ -18,6 +17,7 @@ use crate::common::{
 use crate::core::{
     Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
+use crate::{DatagramHookGuard, MutableItem};
 
 use socket::{DatagramFilter, KrpcSocket};
 
@@ -437,9 +437,9 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                         ActorMessage::ToBootstrap(sender) => {
                             let _ = sender.send(actor.to_bootstrap());
                         }
-                        ActorMessage::AddDatagramHook(filter, response) => {
+                        ActorMessage::AddDatagramHook(filter, removal, response) => {
                             let id = actor.socket.add_datagram_hook(filter);
-                            let _ = response.send(id);
+                            let _ = response.send(DatagramHookGuard { removal: Some(removal), id });
                         }
                         ActorMessage::RemoveDatagramHook(id) => {
                             actor.socket.remove_datagram_hook(id);
@@ -500,7 +500,11 @@ pub(crate) enum ActorMessage {
     ),
     Get(GetRequestSpecific, ResponseSender),
     ToBootstrap(oneshot::Sender<Vec<String>>),
-    AddDatagramHook(DatagramFilter, oneshot::Sender<u64>),
+    AddDatagramHook(
+        DatagramFilter,
+        mpsc::OwnedPermit<ActorMessage>,
+        oneshot::Sender<DatagramHookGuard>,
+    ),
     RemoveDatagramHook(u64),
     SendDatagram(Box<[u8]>, SocketAddrV4),
 }

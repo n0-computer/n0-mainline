@@ -47,18 +47,18 @@ impl From<ActorShutdown> for io::Error {
 
 /// Registration for a synchronous incoming UDP datagram hook.
 ///
-/// Dropping the guard unregisters the hook.
+/// Dropping the guard queues removal using a reserved actor inbox slot.
 #[derive(Debug)]
 pub struct DatagramHookGuard {
-    sender: mpsc::Sender<ActorMessage>,
-    id: u64,
+    pub(crate) removal: Option<mpsc::OwnedPermit<ActorMessage>>,
+    pub(crate) id: u64,
 }
 
 impl Drop for DatagramHookGuard {
     fn drop(&mut self) {
-        let _ = self
-            .sender
-            .try_send(ActorMessage::RemoveDatagramHook(self.id));
+        if let Some(permit) = self.removal.take() {
+            permit.send(ActorMessage::RemoveDatagramHook(self.id));
+        }
     }
 }
 
@@ -213,17 +213,20 @@ impl Dht {
         &self,
         filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static,
     ) -> Result<DatagramHookGuard, ActorShutdown> {
+        let removal = self
+            .0
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| ActorShutdown)?;
         let (response_tx, response_rx) = oneshot::channel();
         self.send(ActorMessage::AddDatagramHook(
             DatagramFilter::new(filter),
+            removal,
             response_tx,
         ))
         .await?;
-        let id = response_rx.await.map_err(|_| ActorShutdown)?;
-        Ok(DatagramHookGuard {
-            sender: self.0.clone(),
-            id,
-        })
+        response_rx.await.map_err(|_| ActorShutdown)
     }
 
     /// Send an opaque datagram from the DHT node's UDP socket.
