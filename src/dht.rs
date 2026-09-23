@@ -196,7 +196,12 @@ impl Dht {
         self.send(ActorMessage::SetDatagramHook(hook)).await
     }
 
-    /// Send an opaque datagram from the DHT node's UDP socket.
+    /// Queue an opaque datagram to be sent from the DHT node's UDP socket.
+    ///
+    /// Success means the datagram was queued for the actor, not that it has been
+    /// written to the socket or delivered to the peer. Socket send errors are
+    /// not reported to this caller. This waits for actor inbox capacity and
+    /// returns [`ActorShutdown`] if the actor is no longer accepting messages.
     pub async fn send_datagram(
         &self,
         bytes: Vec<u8>,
