@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
+use crate::MutableItem;
 use crate::common::{
     FindNodeRequestArguments, Id, Message, MessageType, Node, PutRequestSpecific, RequestSpecific,
     RequestTypeSpecific, SignedAnnounce,
@@ -17,9 +18,8 @@ use crate::common::{
 use crate::core::{
     Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
-use crate::{DatagramHookGuard, MutableItem};
 
-use socket::{DatagramFilter, KrpcSocket};
+use socket::{DatagramHook, KrpcSocket};
 
 pub use info::Info;
 
@@ -437,13 +437,8 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                         ActorMessage::ToBootstrap(sender) => {
                             let _ = sender.send(actor.to_bootstrap());
                         }
-                        ActorMessage::AddDatagramHook(filter, removal, response) => {
-                            let result = actor.socket.add_datagram_hook(filter)
-                                .map(|()| DatagramHookGuard { removal: Some(removal) });
-                            let _ = response.send(result);
-                        }
-                        ActorMessage::RemoveDatagramHook => {
-                            actor.socket.remove_datagram_hook();
+                        ActorMessage::SetDatagramHook(hook) => {
+                            actor.socket.set_datagram_hook(hook);
                         }
                         ActorMessage::SendDatagram(bytes, to) => {
                             actor.socket.send_datagram(bytes, to);
@@ -501,12 +496,7 @@ pub(crate) enum ActorMessage {
     ),
     Get(GetRequestSpecific, ResponseSender),
     ToBootstrap(oneshot::Sender<Vec<String>>),
-    AddDatagramHook(
-        DatagramFilter,
-        mpsc::OwnedPermit<ActorMessage>,
-        oneshot::Sender<io::Result<DatagramHookGuard>>,
-    ),
-    RemoveDatagramHook,
+    SetDatagramHook(Option<DatagramHook>),
     SendDatagram(Box<[u8]>, SocketAddrV4),
 }
 

@@ -126,18 +126,20 @@ pub struct KrpcSocket {
     inflight_requests: InflightRequests,
     /// Outgoing packets queued by sync send methods.
     outbox: VecDeque<(Vec<u8>, SocketAddr)>,
-    datagram_hook: Option<DatagramFilter>,
+    datagram_hook: Option<DatagramHook>,
 
     #[cfg(test)]
     version: [u8; 4],
 }
 
-type DatagramFilterFn = dyn FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static;
+type DatagramHookFn = dyn FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static;
 
-pub(crate) struct DatagramFilter(Box<DatagramFilterFn>);
+/// A synchronous filter for incoming IPv4 UDP datagrams.
+pub struct DatagramHook(Box<DatagramHookFn>);
 
-impl DatagramFilter {
-    pub(crate) fn new(filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static) -> Self {
+impl DatagramHook {
+    /// Wrap a non-blocking filter; returning true consumes the datagram.
+    pub fn new(filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static) -> Self {
         Self(Box::new(filter))
     }
 
@@ -146,9 +148,9 @@ impl DatagramFilter {
     }
 }
 
-impl Debug for DatagramFilter {
+impl Debug for DatagramHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("DatagramFilter(..)")
+        f.write_str("DatagramHook(..)")
     }
 }
 
@@ -269,19 +271,8 @@ impl KrpcSocket {
         self.outbox.push_back((bytes.into_vec(), address.into()));
     }
 
-    pub(crate) fn add_datagram_hook(&mut self, filter: DatagramFilter) -> io::Result<()> {
-        if self.datagram_hook.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "a datagram hook is already registered",
-            ));
-        }
-        self.datagram_hook = Some(filter);
-        Ok(())
-    }
-
-    pub(crate) fn remove_datagram_hook(&mut self) {
-        self.datagram_hook = None;
+    pub(crate) fn set_datagram_hook(&mut self, hook: Option<DatagramHook>) {
+        self.datagram_hook = hook;
     }
 
     /// Async receive: waits for a datagram and returns a parsed KRPC message.
@@ -697,12 +688,10 @@ mod test {
         let mut server = KrpcSocket::server().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
-        server
-            .add_datagram_hook(DatagramFilter::new(move |bytes, from| {
-                let _ = sender.try_send((Box::from(bytes), from));
-                true
-            }))
-            .unwrap();
+        server.set_datagram_hook(Some(DatagramHook::new(move |bytes, from| {
+            let _ = sender.try_send((Box::from(bytes), from));
+            true
+        })));
 
         let mut client = KrpcSocket::client().unwrap();
         client.request(

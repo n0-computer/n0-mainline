@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 #[allow(unused_imports)]
 use crate::{
     Node, ServerSettings,
-    actor::{ActorMessage, Info, ResponseSender, config::Config, socket::DatagramFilter},
+    actor::{ActorMessage, Info, ResponseSender, config::Config, socket::DatagramHook},
     common::{
         AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, FindNodeRequestArguments,
         GetPeersRequestArguments, GetValueRequestArguments, Id, MutableItem,
@@ -42,22 +42,6 @@ pub struct ActorShutdown;
 impl From<ActorShutdown> for io::Error {
     fn from(_: ActorShutdown) -> Self {
         io::Error::other("DHT actor task has shut down")
-    }
-}
-
-/// Registration for a synchronous incoming UDP datagram hook.
-///
-/// Dropping the guard queues removal using a reserved actor inbox slot.
-#[derive(Debug)]
-pub struct DatagramHookGuard {
-    pub(crate) removal: Option<mpsc::OwnedPermit<ActorMessage>>,
-}
-
-impl Drop for DatagramHookGuard {
-    fn drop(&mut self) {
-        if let Some(permit) = self.removal.take() {
-            permit.send(ActorMessage::RemoveDatagramHook);
-        }
     }
 }
 
@@ -202,31 +186,14 @@ impl Dht {
 
     // === Public Methods ===
 
-    /// Add a synchronous filter hook for incoming IPv4 UDP datagrams.
+    /// Set the synchronous filter for incoming IPv4 UDP datagrams.
     ///
-    /// Only one hook may be registered at a time; a second registration returns
-    /// an [`io::ErrorKind::AlreadyExists`] error. The hook runs before KRPC decoding.
-    /// Returning `true` consumes the packet and prevents the KRPC decoder from
-    /// seeing it. The hook must not block; it can use `try_send` to hand accepted
-    /// packets to a caller-owned queue.
-    pub async fn add_datagram_hook(
-        &self,
-        filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static,
-    ) -> io::Result<DatagramHookGuard> {
-        let removal = self
-            .0
-            .clone()
-            .reserve_owned()
-            .await
-            .map_err(|_| ActorShutdown)?;
-        let (response_tx, response_rx) = oneshot::channel();
-        self.send(ActorMessage::AddDatagramHook(
-            DatagramFilter::new(filter),
-            removal,
-            response_tx,
-        ))
-        .await?;
-        response_rx.await.map_err(|_| ActorShutdown)?
+    /// Last writer wins: this replaces the current hook, or clears it with `None`.
+    /// Updates take effect in actor message order. Success means the update was
+    /// queued, not necessarily applied yet. The hook runs before KRPC decoding;
+    /// returning `true` consumes the packet. It must not block.
+    pub async fn set_datagram_hook(&self, hook: Option<DatagramHook>) -> Result<(), ActorShutdown> {
+        self.send(ActorMessage::SetDatagramHook(hook)).await
     }
 
     /// Send an opaque datagram from the DHT node's UDP socket.
@@ -676,16 +643,15 @@ mod test {
     async fn non_krpc_datagrams_share_the_dht_socket() {
         let dht = Dht::builder().no_bootstrap().port(0).build().unwrap();
         let (sender, mut receiver) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
-        let _hook = dht
-            .add_datagram_hook(move |bytes, from| {
-                if !bytes.starts_with(&[0]) {
-                    return false;
-                }
-                let _ = sender.try_send((Box::from(bytes), from));
-                true
-            })
-            .await
-            .unwrap();
+        dht.set_datagram_hook(Some(DatagramHook::new(move |bytes, from| {
+            if !bytes.starts_with(&[0]) {
+                return false;
+            }
+            let _ = sender.try_send((Box::from(bytes), from));
+            true
+        })))
+        .await
+        .unwrap();
 
         let peer = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
