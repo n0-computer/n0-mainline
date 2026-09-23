@@ -51,13 +51,12 @@ impl From<ActorShutdown> for io::Error {
 #[derive(Debug)]
 pub struct DatagramHookGuard {
     pub(crate) removal: Option<mpsc::OwnedPermit<ActorMessage>>,
-    pub(crate) id: u64,
 }
 
 impl Drop for DatagramHookGuard {
     fn drop(&mut self) {
         if let Some(permit) = self.removal.take() {
-            permit.send(ActorMessage::RemoveDatagramHook(self.id));
+            permit.send(ActorMessage::RemoveDatagramHook);
         }
     }
 }
@@ -205,14 +204,15 @@ impl Dht {
 
     /// Add a synchronous filter hook for incoming IPv4 UDP datagrams.
     ///
-    /// Hooks run in registration order before KRPC decoding. Returning `true`
-    /// consumes the packet and prevents later hooks and the KRPC decoder from
+    /// Only one hook may be registered at a time; a second registration returns
+    /// an [`io::ErrorKind::AlreadyExists`] error. The hook runs before KRPC decoding.
+    /// Returning `true` consumes the packet and prevents the KRPC decoder from
     /// seeing it. The hook must not block; it can use `try_send` to hand accepted
     /// packets to a caller-owned queue.
     pub async fn add_datagram_hook(
         &self,
         filter: impl FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static,
-    ) -> Result<DatagramHookGuard, ActorShutdown> {
+    ) -> io::Result<DatagramHookGuard> {
         let removal = self
             .0
             .clone()
@@ -226,7 +226,7 @@ impl Dht {
             response_tx,
         ))
         .await?;
-        response_rx.await.map_err(|_| ActorShutdown)
+        response_rx.await.map_err(|_| ActorShutdown)?
     }
 
     /// Send an opaque datagram from the DHT node's UDP socket.

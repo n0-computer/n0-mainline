@@ -126,8 +126,7 @@ pub struct KrpcSocket {
     inflight_requests: InflightRequests,
     /// Outgoing packets queued by sync send methods.
     outbox: VecDeque<(Vec<u8>, SocketAddr)>,
-    datagram_hooks: Vec<(u64, DatagramFilter)>,
-    next_datagram_hook: u64,
+    datagram_hook: Option<DatagramFilter>,
 
     #[cfg(test)]
     version: [u8; 4],
@@ -177,8 +176,7 @@ impl KrpcSocket {
             inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
-            datagram_hooks: Vec::new(),
-            next_datagram_hook: 0,
+            datagram_hook: None,
 
             #[cfg(test)]
             version: if config.disable_announce_signed_peers {
@@ -271,16 +269,19 @@ impl KrpcSocket {
         self.outbox.push_back((bytes.into_vec(), address.into()));
     }
 
-    pub(crate) fn add_datagram_hook(&mut self, filter: DatagramFilter) -> u64 {
-        let id = self.next_datagram_hook;
-        self.next_datagram_hook = self.next_datagram_hook.wrapping_add(1);
-        self.datagram_hooks.push((id, filter));
-        id
+    pub(crate) fn add_datagram_hook(&mut self, filter: DatagramFilter) -> io::Result<()> {
+        if self.datagram_hook.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "a datagram hook is already registered",
+            ));
+        }
+        self.datagram_hook = Some(filter);
+        Ok(())
     }
 
-    pub(crate) fn remove_datagram_hook(&mut self, id: u64) {
-        self.datagram_hooks
-            .retain(|(candidate, _)| *candidate != id);
+    pub(crate) fn remove_datagram_hook(&mut self) {
+        self.datagram_hook = None;
     }
 
     /// Async receive: waits for a datagram and returns a parsed KRPC message.
@@ -302,9 +303,9 @@ impl KrpcSocket {
                 }
 
                 if self
-                    .datagram_hooks
-                    .iter_mut()
-                    .any(|(_, hook)| hook.accept(bytes, from))
+                    .datagram_hook
+                    .as_mut()
+                    .is_some_and(|hook| hook.accept(bytes, from))
                 {
                     return None;
                 }
@@ -696,10 +697,12 @@ mod test {
         let mut server = KrpcSocket::server().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
-        server.add_datagram_hook(DatagramFilter::new(move |bytes, from| {
-            let _ = sender.try_send((Box::from(bytes), from));
-            true
-        }));
+        server
+            .add_datagram_hook(DatagramFilter::new(move |bytes, from| {
+                let _ = sender.try_send((Box::from(bytes), from));
+                true
+            }))
+            .unwrap();
 
         let mut client = KrpcSocket::client().unwrap();
         client.request(

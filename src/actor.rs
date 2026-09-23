@@ -438,11 +438,12 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                             let _ = sender.send(actor.to_bootstrap());
                         }
                         ActorMessage::AddDatagramHook(filter, removal, response) => {
-                            let id = actor.socket.add_datagram_hook(filter);
-                            let _ = response.send(DatagramHookGuard { removal: Some(removal), id });
+                            let result = actor.socket.add_datagram_hook(filter)
+                                .map(|()| DatagramHookGuard { removal: Some(removal) });
+                            let _ = response.send(result);
                         }
-                        ActorMessage::RemoveDatagramHook(id) => {
-                            actor.socket.remove_datagram_hook(id);
+                        ActorMessage::RemoveDatagramHook => {
+                            actor.socket.remove_datagram_hook();
                         }
                         ActorMessage::SendDatagram(bytes, to) => {
                             actor.socket.send_datagram(bytes, to);
@@ -503,9 +504,9 @@ pub(crate) enum ActorMessage {
     AddDatagramHook(
         DatagramFilter,
         mpsc::OwnedPermit<ActorMessage>,
-        oneshot::Sender<DatagramHookGuard>,
+        oneshot::Sender<io::Result<DatagramHookGuard>>,
     ),
-    RemoveDatagramHook(u64),
+    RemoveDatagramHook,
     SendDatagram(Box<[u8]>, SocketAddrV4),
 }
 
