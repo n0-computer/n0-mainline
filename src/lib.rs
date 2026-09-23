@@ -35,3 +35,6 @@ pub mod errors {
 
     pub use super::common::DecodeIdError;
 }
+
+/// Incoming UDP datagram filter.
+pub use actor::socket::DatagramHook;

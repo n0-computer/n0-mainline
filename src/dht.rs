@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 #[allow(unused_imports)]
 use crate::{
     Node, ServerSettings,
-    actor::{ActorMessage, Info, ResponseSender, config::Config},
+    actor::{ActorMessage, Info, ResponseSender, config::Config, socket::DatagramHook},
     common::{
         AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, FindNodeRequestArguments,
         GetPeersRequestArguments, GetValueRequestArguments, Id, MutableItem,
@@ -185,6 +185,30 @@ impl Dht {
     }
 
     // === Public Methods ===
+
+    /// Set the synchronous filter for incoming IPv4 UDP datagrams.
+    ///
+    /// Last writer wins: this replaces the current hook, or clears it with `None`.
+    /// Updates take effect in actor message order. Success means the update was
+    /// queued, not necessarily applied yet. The hook runs before KRPC decoding;
+    /// returning `true` consumes the packet. It must not block.
+    pub async fn set_datagram_hook(&self, hook: Option<DatagramHook>) -> Result<(), ActorShutdown> {
+        self.send(ActorMessage::SetDatagramHook(hook)).await
+    }
+
+    /// Queue an opaque datagram to be sent from the DHT node's UDP socket.
+    ///
+    /// Success means the datagram was queued for the actor, not that it has been
+    /// written to the socket or delivered to the peer. Socket send errors are
+    /// not reported to this caller. This waits for actor inbox capacity and
+    /// returns [`ActorShutdown`] if the actor is no longer accepting messages.
+    pub async fn send_datagram(
+        &self,
+        bytes: Vec<u8>,
+        to: SocketAddrV4,
+    ) -> Result<(), ActorShutdown> {
+        self.send(ActorMessage::SendDatagram(bytes, to)).await
+    }
 
     /// Await until the bootstrapping query is done.
     ///
@@ -604,7 +628,11 @@ impl From<ActorShutdown> for PutError {
 
 #[cfg(test)]
 mod test {
-    use std::{str::FromStr, time::Duration};
+    use std::{
+        net::{Ipv4Addr, SocketAddrV4},
+        str::FromStr,
+        time::Duration,
+    };
 
     use ed25519_dalek::SigningKey;
     use futures::StreamExt;
@@ -614,6 +642,40 @@ mod test {
     use crate::core::ConcurrencyError;
 
     use super::*;
+
+    #[tokio::test]
+    async fn non_krpc_datagrams_share_the_dht_socket() {
+        let dht = Dht::builder().no_bootstrap().port(0).build().unwrap();
+        let (sender, mut receiver) = mpsc::channel::<(Box<[u8]>, SocketAddrV4)>(1);
+        dht.set_datagram_hook(Some(DatagramHook::new(move |bytes, from| {
+            if !bytes.starts_with(&[0]) {
+                return false;
+            }
+            let _ = sender.try_send((Box::from(bytes), from));
+            true
+        })))
+        .await
+        .unwrap();
+
+        let peer = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let dht_addr = SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            dht.info().await.unwrap().local_addr().port(),
+        );
+        peer.send_to(&[0, 1, 2, 3], dht_addr).await.unwrap();
+
+        let (bytes, from) = receiver.recv().await.unwrap();
+        assert_eq!(&*bytes, &[0, 1, 2, 3]);
+        assert_eq!(from.port(), peer.local_addr().unwrap().port());
+
+        dht.send_datagram(vec![4, 5, 6], from).await.unwrap();
+        let mut buf = [0; 16];
+        let (len, response_from) = peer.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], &[4, 5, 6]);
+        assert_eq!(response_from.port(), dht_addr.port());
+    }
 
     #[tokio::test]
     #[ignore = "hits the real mainline DHT; run with --ignored"]
