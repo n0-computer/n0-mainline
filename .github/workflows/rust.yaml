@@ -16,13 +16,12 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    # actions-rs was archived in 2023 and its runner is too old for current
+    # runners; rust-toolchain.toml already pins the channel.
     - name: Set up Rust
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
-        toolchain: stable
         components: rustfmt, clippy
-        override: true
 
     - name: Cache cargo registry
       uses: actions/cache@v4
