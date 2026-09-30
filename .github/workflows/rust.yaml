@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  NEXTEST_VERSION: "0.9.80"
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -48,17 +51,12 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-build-
 
-    - name: Cache Nextest installation
-      uses: actions/cache@v4
+    # Was a cargo install behind a cache keyed only on the OS, so whatever
+    # binary landed there first was reused forever, unversioned.
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@v2
       with:
-        path: ~/.cargo/bin/cargo-nextest
-        key: ${{ runner.os }}-cargo-nextest
-
-    - name: Install Nextest if not cached
-      run: |
-        if [ ! -f ~/.cargo/bin/cargo-nextest ]; then
-          cargo install cargo-nextest --locked
-        fi
+        tool: nextest@${{ env.NEXTEST_VERSION }}
 
     - name: Check formatting
       id: fmt
