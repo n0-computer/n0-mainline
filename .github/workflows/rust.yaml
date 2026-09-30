@@ -67,17 +67,17 @@ jobs:
       continue-on-error: true
 
     - name: Lint with Clippy
-      run: cargo clippy --workspace --bins --tests -- -D warnings
+      run: cargo clippy --locked --workspace --bins --tests -- -D warnings
 
     - name: Build
       if: steps.cargo-build-cache.outputs.cache-hit != 'true'
-      run: cargo build --release --workspace --verbose
+      run: cargo build --locked --release --workspace --verbose
 
     - name: Run tests with Nextest
-      run: cargo nextest run --workspace --verbose
+      run: cargo nextest run --locked --workspace --verbose
 
     - name: Run docs
-      run: cargo doc --workspace --no-deps --document-private-items --verbose
+      run: cargo doc --locked --workspace --no-deps --document-private-items --verbose
 
     - name: Fail if formatting check failed
       if: steps.fmt.outcome == 'failure'
@@ -89,8 +89,12 @@ jobs:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@nightly
     - uses: dtolnay/rust-toolchain@stable
+    # No --locked on the update: re-resolving is the point, so
+    # -Z min-publish-age guards the versions the lockfile has never seen.
     - name: Resolve to minimum versions
-      run: cargo +nightly -Z minimal-versions update
+      run: |
+        cargo +nightly -Z minimal-versions -Z min-publish-age update \
+          --config 'registry.global-min-publish-age="3 days"'
     - name: Check lib at minimum versions
       run: cargo check --lib --locked
 
