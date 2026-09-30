@@ -141,7 +141,7 @@ fn datagrams(batch: &[u8], len: usize, stride: usize) -> impl Iterator<Item = &[
 /// A UdpSocket wrapper that formats and correlates DHT requests and responses.
 ///
 /// Sends are queued synchronously and flushed asynchronously via [`Self::flush`].
-/// Receives are fully async via [`Self::recv_from`].
+/// Receives are fully async via [`Self::recv_batch`].
 #[derive(Debug)]
 pub struct KrpcSocket {
     io: UdpIo,
