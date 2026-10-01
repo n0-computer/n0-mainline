@@ -18,7 +18,7 @@ pub struct Config {
     pub bootstrap: Vec<String>,
     /// Explicit port to listen on.
     ///
-    /// Defaults to None
+    /// Defaults to None, which binds a random port chosen by the OS.
     pub port: Option<u16>,
     /// Server to respond to incoming Requests
     pub server_settings: ServerSettings,
