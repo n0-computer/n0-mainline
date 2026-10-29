@@ -29,7 +29,7 @@ crc = "3"
 sha1_smol = "1"
 ed25519-dalek = ">=3.0.0-rc.0,<4.0.0"
 tracing = "0.1.40"
-lru = { version = "0.18", default-features = false }
+lru = { version = "0.19", default-features = false }
 dyn-clone = "1"
 tokio = { version = "1.39", default-features = false, features = ["sync", "net", "time", "rt", "macros"] }
 futures-core = "0.3"
