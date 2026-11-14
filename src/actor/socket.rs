@@ -21,8 +21,6 @@ use super::config::Config;
 
 const MTU: usize = 2048;
 
-const DEFAULT_PORT: u16 = 6881;
-
 const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Version before supporting `announce_signed_peers`
@@ -181,16 +179,11 @@ impl Debug for DatagramHook {
 
 impl KrpcSocket {
     pub(crate) fn new(config: &Config) -> io::Result<Self> {
-        let port = config.port;
-
-        let io = if let Some(port) = port {
-            UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], port)))?
-        } else {
-            match UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))) {
-                Ok(io) => Ok(io),
-                Err(_) => UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], 0))),
-            }?
-        };
+        // Without an explicit port, let the OS pick one. A fixed default would
+        // make every machine behind a port-preserving NAT show up as the same
+        // public socket.
+        let port = config.port.unwrap_or(0);
+        let io = UdpIo::bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
 
         let local_addr = match io.local_addr()? {
             SocketAddr::V4(addr) => addr,

@@ -105,6 +105,10 @@ impl DhtBuilder {
     }
 
     /// Set an explicit port to listen on.
+    ///
+    /// Without it, the node binds a random port chosen by the OS. Server-mode
+    /// nodes that others should find at a stable address, such as bootstrap
+    /// nodes, usually want a fixed port like 6881.
     pub fn port(&mut self, port: u16) -> &mut Self {
         self.0.port = Some(port);
 
