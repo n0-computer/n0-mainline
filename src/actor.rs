@@ -54,14 +54,7 @@ impl Actor {
         };
 
         let socket = KrpcSocket::new(&config)?;
-        let bootstrap = config
-            .bootstrap
-            .iter()
-            .flat_map(|host| {
-                let addrs = host.to_socket_addrs();
-                filter_resolved(host, addrs)
-            })
-            .collect();
+        let bootstrap = resolve_bootstrap_hosts(&config.bootstrap);
 
         let address = socket.local_addr();
         info!(?address, "Mainline DHT started");
@@ -297,13 +290,8 @@ impl Actor {
         self.last_bootstrap_resolve = Instant::now();
         let hosts = self.bootstrap_hosts.clone();
         debug!("Resolving bootstrap hosts again");
-        self.bootstrap_resolve = Some(tokio::spawn(async move {
-            let mut resolved = Vec::new();
-            for host in hosts.iter() {
-                let addrs = tokio::net::lookup_host(host.as_str()).await;
-                resolved.extend(filter_resolved(host, addrs));
-            }
-            resolved
+        self.bootstrap_resolve = Some(tokio::task::spawn_blocking(move || {
+            resolve_bootstrap_hosts(&hosts)
         }));
     }
 
@@ -521,23 +509,21 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
     }
 }
 
-/// Keeps the IPv4 addresses of a resolved bootstrap host, logging resolution errors.
-fn filter_resolved(
-    host: &str,
-    addrs: io::Result<impl Iterator<Item = SocketAddr>>,
-) -> Vec<SocketAddrV4> {
-    match addrs {
-        Ok(addrs) => addrs
-            .filter_map(|addr| match addr {
+/// Resolves bootstrap hosts to IPv4 addresses, logging resolution errors.
+fn resolve_bootstrap_hosts(hosts: &[String]) -> Vec<SocketAddrV4> {
+    let mut resolved = Vec::new();
+    for host in hosts {
+        match host.to_socket_addrs() {
+            Ok(addrs) => resolved.extend(addrs.filter_map(|addr| match addr {
                 SocketAddr::V4(addr_v4) => Some(addr_v4),
                 _ => None,
-            })
-            .collect(),
-        Err(error) => {
-            warn!(host, %error, "Failed to resolve bootstrap host");
-            Vec::new()
+            })),
+            Err(error) => {
+                warn!(host, %error, "Failed to resolve bootstrap host");
+            }
         }
     }
+    resolved
 }
 
 fn send(sender: &mut ResponseSender, response: Response) {
