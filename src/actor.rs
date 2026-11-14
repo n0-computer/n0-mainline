@@ -5,10 +5,11 @@ pub(crate) mod socket;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 
 use crate::MutableItem;
 use crate::common::{
@@ -31,7 +32,17 @@ pub(crate) struct Actor {
 
     put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
     get_senders: HashMap<Id, Vec<ResponseSender>>,
+
+    /// Configured bootstrap hosts, kept so they can be resolved again.
+    bootstrap_hosts: Box<[String]>,
+    /// When the bootstrap hosts were last resolved.
+    last_bootstrap_resolve: Instant,
+    /// Resolution of the bootstrap hosts running in the background.
+    bootstrap_resolve: Option<JoinHandle<Vec<SocketAddrV4>>>,
 }
+
+/// Minimum time between resolving the bootstrap hosts again while the routing table is empty.
+const BOOTSTRAP_RESOLVE_INTERVAL: Duration = Duration::from_secs(30);
 
 impl Actor {
     /// Create a new actor
@@ -43,21 +54,7 @@ impl Actor {
         };
 
         let socket = KrpcSocket::new(&config)?;
-        let bootstrap = config
-            .bootstrap
-            .iter()
-            .flat_map(|s| {
-                s.to_socket_addrs().map(|addrs| {
-                    addrs
-                        .filter_map(|addr| match addr {
-                            SocketAddr::V4(addr_v4) => Some(addr_v4),
-                            _ => None,
-                        })
-                        .collect::<Box<[_]>>()
-                })
-            })
-            .flatten()
-            .collect();
+        let bootstrap = resolve_bootstrap_hosts(&config.bootstrap);
 
         let address = socket.local_addr();
         info!(?address, "Mainline DHT started");
@@ -68,6 +65,10 @@ impl Actor {
 
             put_senders: HashMap::new(),
             get_senders: HashMap::new(),
+
+            bootstrap_hosts: config.bootstrap.into(),
+            last_bootstrap_resolve: Instant::now(),
+            bootstrap_resolve: None,
         })
     }
 
@@ -247,6 +248,7 @@ impl Actor {
     fn periodic_node_maintaenance(&mut self) {
         // Bootstrap if necessary
         if self.core.routing_table.is_empty() {
+            self.maybe_resolve_bootstrap();
             self.populate();
         }
 
@@ -270,6 +272,38 @@ impl Actor {
                 self.ping(address);
             }
         }
+    }
+
+    /// Resolves the bootstrap hosts again in the background.
+    ///
+    /// Runs at most every [`BOOTSTRAP_RESOLVE_INTERVAL`]. The hosts are first
+    /// resolved when the actor is created. If DNS was not available then, or
+    /// the addresses have changed since, the node could otherwise never
+    /// bootstrap.
+    fn maybe_resolve_bootstrap(&mut self) {
+        if self.bootstrap_hosts.is_empty()
+            || self.bootstrap_resolve.is_some()
+            || self.last_bootstrap_resolve.elapsed() < BOOTSTRAP_RESOLVE_INTERVAL
+        {
+            return;
+        }
+        self.last_bootstrap_resolve = Instant::now();
+        let hosts = self.bootstrap_hosts.clone();
+        debug!("Resolving bootstrap hosts again");
+        self.bootstrap_resolve = Some(tokio::task::spawn_blocking(move || {
+            resolve_bootstrap_hosts(&hosts)
+        }));
+    }
+
+    /// Replaces the bootstrap addresses with a finished resolution.
+    fn set_bootstrap(&mut self, bootstrap: Vec<SocketAddrV4>) {
+        self.bootstrap_resolve = None;
+        if bootstrap.is_empty() {
+            // Keep the previous addresses, they are better than none.
+            return;
+        }
+        debug!(?bootstrap, "Resolved bootstrap hosts");
+        self.core.bootstrap = bootstrap.into();
     }
 
     fn set_server_mode(&mut self, mode: bool) {
@@ -403,6 +437,7 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
         // Flush any queued outgoing packets
         actor.socket.flush().await;
 
+        let bootstrap_resolve = actor.bootstrap_resolve.as_mut();
         tokio::select! {
             msg = receiver.recv() => {
                 match msg {
@@ -456,6 +491,14 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                     actor.process_message(message, from);
                 }
             }
+            resolved = async {
+                match bootstrap_resolve {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                actor.set_bootstrap(resolved.unwrap_or_default());
+            }
             _ = maintenance.tick() => {
                 // Wake the loop so actor.tick() runs even when idle,
                 // ensuring routing table refresh and node pings happen on schedule.
@@ -464,6 +507,23 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
 
         actor.tick();
     }
+}
+
+/// Resolves bootstrap hosts to IPv4 addresses, logging resolution errors.
+fn resolve_bootstrap_hosts(hosts: &[String]) -> Vec<SocketAddrV4> {
+    let mut resolved = Vec::new();
+    for host in hosts {
+        match host.to_socket_addrs() {
+            Ok(addrs) => resolved.extend(addrs.filter_map(|addr| match addr {
+                SocketAddr::V4(addr_v4) => Some(addr_v4),
+                _ => None,
+            })),
+            Err(error) => {
+                warn!(host, %error, "Failed to resolve bootstrap host");
+            }
+        }
+    }
+    resolved
 }
 
 fn send(sender: &mut ResponseSender, response: Response) {
@@ -509,4 +569,39 @@ pub(crate) enum ResponseSender {
     SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
     Mutable(mpsc::UnboundedSender<MutableItem>),
     Immutable(Option<oneshot::Sender<Box<[u8]>>>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Dht, Testnet};
+
+    /// A node whose bootstrap hosts failed to resolve recovers once they resolve.
+    #[tokio::test]
+    async fn resolves_bootstrap_hosts_again() {
+        let testnet = Testnet::new(3).await.unwrap();
+
+        let config = config::Config {
+            bootstrap: vec!["bootstrap.invalid:6881".to_string()],
+            ..Default::default()
+        };
+        let mut actor = Actor::new(config).unwrap();
+        assert!(actor.core.bootstrap.is_empty());
+
+        // DNS works again: the hosts now resolve, and the interval has passed.
+        actor.bootstrap_hosts = testnet.bootstrap.clone().into();
+        actor.last_bootstrap_resolve = Instant::now() - BOOTSTRAP_RESOLVE_INTERVAL;
+
+        let (sender, receiver) = mpsc::channel(16);
+        tokio::spawn(run(actor, receiver));
+        let dht = Dht(sender);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !dht.bootstrapped().await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("node did not bootstrap after its hosts resolved");
+    }
 }
