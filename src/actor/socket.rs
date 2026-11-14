@@ -76,7 +76,7 @@ impl UdpIo {
         loop {
             self.socket.writable().await?;
             match self.socket.try_io(Interest::WRITABLE, || {
-                self.state.send((&self.socket).into(), &transmit)
+                self.state.try_send((&self.socket).into(), &transmit)
             }) {
                 Ok(()) => return Ok(()),
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
@@ -850,7 +850,7 @@ mod test {
                 segment_size: Some(100),
                 src_ip: None,
             };
-            state.send((&sender).into(), &transmit).unwrap();
+            state.try_send((&sender).into(), &transmit).unwrap();
         } else {
             for datagram in &sent {
                 sender.send_to(datagram, destination).unwrap();
