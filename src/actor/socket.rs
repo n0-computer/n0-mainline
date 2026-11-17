@@ -24,6 +24,9 @@ const MTU: usize = 2048;
 const DEFAULT_PORT: u16 = 6881;
 
 const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+/// Upper bound for the adaptive request timeout, so that slow or malicious responders can
+/// delay lookups only by a bounded amount.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
@@ -524,7 +527,7 @@ impl InflightRequests {
     }
 
     fn request_timeout(&self) -> Duration {
-        self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)
+        (self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)).min(MAX_REQUEST_TIMEOUT)
     }
 
     fn get(&self, key: u32) -> Option<&InflightRequest> {
@@ -562,12 +565,18 @@ impl InflightRequests {
             Ok(index) => {
                 let request = self.requests.remove(index);
 
-                self.update_rtt_estimates(request.sent_at.elapsed());
-                trace!(
-                    "Updated estimated round trip time {:?} and request timeout {:?}",
-                    self.estimated_rtt,
-                    self.request_timeout()
-                );
+                // A response that arrives long after the request timed out is still handled,
+                // but it does not count as a round trip sample: otherwise a single late
+                // response could inflate the timeout for every later request.
+                let rtt = request.sent_at.elapsed();
+                if rtt <= self.request_timeout() * 2 {
+                    self.update_rtt_estimates(rtt);
+                    trace!(
+                        "Updated estimated round trip time {:?} and request timeout {:?}",
+                        self.estimated_rtt,
+                        self.request_timeout()
+                    );
+                }
 
                 Some(request)
             }
@@ -576,9 +585,9 @@ impl InflightRequests {
     }
 
     fn update_rtt_estimates(&mut self, sample_rtt: Duration) {
-        if sample_rtt < MIN_REQUEST_TIMEOUT {
-            return;
-        }
+        // Clamp instead of ignoring fast responses, so that the estimate comes back down
+        // after a spike.
+        let sample_rtt = sample_rtt.clamp(MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT);
 
         // Use TCP-like alpha = 1/8, beta = 1/4
         let alpha = 0.125;
@@ -877,8 +886,25 @@ mod test {
         assert!(socket.inflight_requests.requests.capacity() <= 64);
     }
 
+    #[test]
+    fn request_timeout_is_bounded_and_recovers() {
+        let mut requests = InflightRequests::new();
+        assert_eq!(requests.request_timeout(), MIN_REQUEST_TIMEOUT);
+        // Responses that each arrive just within the accepted range ratchet the timeout up,
+        // but never beyond the maximum.
+        for _ in 0..100 {
+            let sample = requests.request_timeout().mul_f64(1.9);
+            requests.update_rtt_estimates(sample);
+        }
+        assert_eq!(requests.request_timeout(), MAX_REQUEST_TIMEOUT);
+        // Fast responses bring it back down to the minimum.
+        for _ in 0..200 {
+            requests.update_rtt_estimates(Duration::from_millis(50));
+        }
+        assert!(requests.request_timeout() < MIN_REQUEST_TIMEOUT.mul_f64(1.1));
+    }
+
     #[tokio::test]
-    #[ignore = "ANT-2026-51OFOF9U"]
     async fn late_response_does_not_inflate_request_timeout() {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
