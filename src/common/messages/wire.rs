@@ -377,3 +377,179 @@ fn decode_error(msg: &Dict<'_>) -> Result<ErrorSpecific, BencodeError> {
         description: String::from_utf8(description.to_vec()).map_err(|_| invalid())?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID_A: &[u8; 20] = b"abcdefghij0123456789";
+    const ID_M: &[u8; 20] = b"mnopqrstuvwxyz123456";
+    /// Transaction id `aa` from the BEP 5 examples.
+    const TID: u32 = 0x6161;
+
+    fn request(bytes: &[u8]) -> RequestSpecific {
+        let msg = Message::from_bytes(bytes).unwrap();
+        assert_eq!(msg.transaction_id, TID);
+        match msg.message_type {
+            MessageType::Request(request) => Some(request),
+            _ => None,
+        }
+        .expect("not a request")
+    }
+
+    fn response(bytes: &[u8]) -> ResponseSpecific {
+        let msg = Message::from_bytes(bytes).unwrap();
+        assert_eq!(msg.transaction_id, TID);
+        match msg.message_type {
+            MessageType::Response(response) => Some(response),
+            _ => None,
+        }
+        .expect("not a response")
+    }
+
+    // The examples from BEP 5, verbatim.
+
+    #[test]
+    fn bep5_ping() {
+        let req = request(b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe");
+        assert_eq!(req.requester_id, Id::from(*ID_A));
+        assert_eq!(req.request_type, RequestTypeSpecific::Ping);
+
+        let res = response(b"d1:rd2:id20:mnopqrstuvwxyz123456e1:t2:aa1:y1:re");
+        assert_eq!(
+            res,
+            ResponseSpecific::Ping(PingResponseArguments {
+                responder_id: Id::from(*ID_M)
+            })
+        );
+    }
+
+    #[test]
+    fn bep5_find_node() {
+        let req = request(
+            b"d1:ad2:id20:abcdefghij01234567896:target20:mnopqrstuvwxyz123456e1:q9:find_node1:t2:aa1:y1:qe",
+        );
+        assert_eq!(
+            req.request_type,
+            RequestTypeSpecific::FindNode(FindNodeRequestArguments {
+                target: Id::from(*ID_M)
+            })
+        );
+    }
+
+    #[test]
+    fn bep5_get_peers() {
+        let req = request(
+            b"d1:ad2:id20:abcdefghij01234567899:info_hash20:mnopqrstuvwxyz123456e1:q9:get_peers1:t2:aa1:y1:qe",
+        );
+        assert_eq!(
+            req.request_type,
+            RequestTypeSpecific::GetPeers(GetPeersRequestArguments {
+                info_hash: Id::from(*ID_M)
+            })
+        );
+
+        let res = response(
+            b"d1:rd2:id20:abcdefghij01234567895:token8:aoeusnth6:valuesl6:axje.u6:idhtnmee1:t2:aa1:y1:re",
+        );
+        assert_eq!(
+            res,
+            ResponseSpecific::GetPeers(GetPeersResponseArguments {
+                responder_id: Id::from(*ID_A),
+                token: b"aoeusnth".to_vec().into(),
+                values: vec![
+                    bytes_to_sockaddr(b"axje.u").unwrap(),
+                    bytes_to_sockaddr(b"idhtnm").unwrap(),
+                ],
+                nodes: None,
+            })
+        );
+    }
+
+    #[test]
+    fn bep5_announce_peer() {
+        let req = request(
+            b"d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:qe",
+        );
+        assert_eq!(
+            req.request_type,
+            RequestTypeSpecific::Put(PutRequest {
+                token: b"aoeusnth".to_vec().into(),
+                put_request_type: PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {
+                    info_hash: Id::from(*ID_M),
+                    port: 6881,
+                    implied_port: Some(true),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn bep5_error() {
+        let msg =
+            Message::from_bytes(b"d1:eli201e23:A Generic Error Ocurrede1:t2:aa1:y1:ee").unwrap();
+        assert_eq!(
+            msg.message_type,
+            MessageType::Error(ErrorSpecific {
+                code: 201,
+                description: "A Generic Error Ocurred".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn encode_ping() {
+        // Same as the BEP 5 example, plus the `ro` flag we always send.
+        let msg = Message {
+            transaction_id: TID,
+            version: None,
+            requester_ip: None,
+            read_only: false,
+            message_type: MessageType::Request(RequestSpecific {
+                requester_id: Id::from(*ID_A),
+                request_type: RequestTypeSpecific::Ping,
+            }),
+        };
+        assert_eq!(
+            msg.to_bytes(),
+            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping2:roi0e1:t4:\0\0aa1:y1:qe"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_and_unsorted_input() {
+        // Keys in reverse order, with unknown keys at both levels.
+        let req = request(b"d1:y1:q1:t2:aa1:q4:ping1:zli1ee1:ad1:x0:2:id20:abcdefghij0123456789ee");
+        assert_eq!(req.request_type, RequestTypeSpecific::Ping);
+    }
+
+    #[test]
+    fn rejects_invalid_messages() {
+        for bytes in [
+            // missing transaction id
+            &b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:y1:qe"[..],
+            // transaction id of 3 bytes
+            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t3:aaa1:y1:qe",
+            // id of 19 bytes
+            b"d1:ad2:id19:abcdefghij012345678e1:q4:ping1:t2:aa1:y1:qe",
+            // unknown query
+            b"d1:ad2:id20:abcdefghij0123456789e1:q4:pong1:t2:aa1:y1:qe",
+            // unknown message type
+            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:xe",
+            // port out of range
+            b"d1:ad2:id20:abcdefghij01234567899:info_hash20:mnopqrstuvwxyz1234564:porti65536e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:qe",
+            // peer address of 5 bytes
+            b"d1:rd2:id20:abcdefghij01234567895:token8:aoeusnth6:valuesl5:axje.ee1:t2:aa1:y1:re",
+            // error without a message
+            b"d1:eli201ee1:t2:aa1:y1:ee",
+            // not a dictionary
+            b"l1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe",
+        ] {
+            assert!(
+                Message::from_bytes(bytes).is_err(),
+                "{}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+}

@@ -131,13 +131,17 @@ impl<'a> Decoder<'a> {
                         return Err(BencodeError::NonStringKey);
                     }
                     let key = self.bytes()?;
-                    if dict.get(key).is_some() {
-                        return Err(BencodeError::DuplicateKey);
-                    }
                     let value = self.value(depth)?;
-                    dict.insert(key, value);
+                    dict.0.push((key, value));
                 }
                 self.rest = &self.rest[1..];
+                // Checked once at the end: checking each key on insertion is quadratic in
+                // the number of keys, which an attacker controls.
+                let mut keys: Vec<_> = dict.0.iter().map(|(k, _)| *k).collect();
+                keys.sort_unstable();
+                if keys.windows(2).any(|w| w[0] == w[1]) {
+                    return Err(BencodeError::DuplicateKey);
+                }
                 Ok(Value::Dict(dict))
             }
             _ => Err(BencodeError::InvalidToken),
@@ -306,6 +310,14 @@ impl Dict<'_> {
 mod tests {
     use super::*;
 
+    fn as_dict(value: Value<'_>) -> Dict<'_> {
+        match value {
+            Value::Dict(dict) => Some(dict),
+            _ => None,
+        }
+        .expect("not a dict")
+    }
+
     fn roundtrip(input: &[u8]) {
         assert_eq!(encode_to_vec(&decode(input).unwrap()), input);
     }
@@ -351,6 +363,8 @@ mod tests {
             (b"di1ei2ee", NonStringKey),
             (b"d1:a", UnexpectedEnd),
             (b"d1:ai1e1:ai2ee", DuplicateKey),
+            (b"d1:ai1e1:bi2e1:ai3ee", DuplicateKey),
+            (b"d1:ad1:xi1e1:xi2eee", DuplicateKey),
         ] {
             assert_eq!(
                 decode(input),
@@ -359,6 +373,38 @@ mod tests {
                 String::from_utf8_lossy(input)
             );
         }
+    }
+
+    #[test]
+    fn decodes_values() {
+        let value = decode(b"d1:bli-3e3:\x00\xff:e1:ad1:x0:ee").unwrap();
+        let dict = as_dict(value);
+        assert_eq!(
+            dict.get(b"b"),
+            Some(&Value::List(vec![
+                Value::Int(-3),
+                Value::Bytes(Cow::Borrowed(b"\x00\xff:"))
+            ]))
+        );
+        assert_eq!(dict.dict("a").unwrap().bytes("x").unwrap(), b"");
+        assert_eq!(dict.list("b").unwrap().len(), 2);
+        assert_eq!(dict.bytes("b"), Err(BencodeError::InvalidValue("b")));
+        assert_eq!(dict.bytes("c"), Err(BencodeError::MissingKey("c")));
+    }
+
+    #[test]
+    fn many_keys() {
+        // Unsorted, distinct keys: decoding must stay fast, and a late duplicate is found.
+        let mut input = b"d".to_vec();
+        for i in (0..10_000u32).rev() {
+            input.extend_from_slice(format!("5:{i:05}0:").as_bytes());
+        }
+        let mut with_duplicate = input.clone();
+        input.push(b'e');
+        let dict = as_dict(decode(&input).unwrap());
+        assert_eq!(dict.0.len(), 10_000);
+        with_duplicate.extend_from_slice(b"5:042420:e");
+        assert_eq!(decode(&with_duplicate), Err(BencodeError::DuplicateKey));
     }
 
     #[test]
