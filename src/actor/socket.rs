@@ -251,9 +251,7 @@ impl KrpcSocket {
         trace!(context = "socket_message_sending", message = ?message);
 
         let tid = message.transaction_id;
-        let _ = self.enqueue(address, message).map_err(|e| {
-            debug!(?e, "Error encoding request message");
-        });
+        self.enqueue(address, message);
 
         tid
     }
@@ -269,18 +267,14 @@ impl KrpcSocket {
         let message =
             self.response_message(MessageType::Response(response), address, transaction_id);
         trace!(context = "socket_message_sending", message = ?message);
-        let _ = self.enqueue(address, message).map_err(|e| {
-            debug!(?e, "Error encoding response message");
-        });
+        self.enqueue(address, message);
     }
 
     /// Send an error to the given address.
     /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn error(&mut self, address: SocketAddrV4, transaction_id: u32, error: ErrorSpecific) {
         let message = self.response_message(MessageType::Error(error), address, transaction_id);
-        let _ = self.enqueue(address, message).map_err(|e| {
-            debug!(?e, "Error encoding error message");
-        });
+        self.enqueue(address, message);
     }
 
     /// Flush all queued outgoing packets.
@@ -466,24 +460,11 @@ impl KrpcSocket {
     }
 
     /// Encode a message and queue it for sending.
-    fn enqueue(&mut self, address: SocketAddrV4, message: Message) -> Result<(), SendMessageError> {
-        let bytes = message.to_bytes()?;
+    fn enqueue(&mut self, address: SocketAddrV4, message: Message) {
+        let bytes = message.to_bytes();
         trace!(context = "socket_message_sending", message = ?message);
         self.outbox.push_back((bytes, SocketAddr::from(address)));
-        Ok(())
     }
-}
-
-#[n0_error::stack_error(derive, from_sources, std_sources)]
-/// Mainline crate error enum.
-enum SendMessageError {
-    /// Errors related to parsing DHT messages.
-    #[error(transparent)]
-    BencodeError(serde_bencode::Error),
-
-    #[error(transparent)]
-    /// IO error
-    IO(std::io::Error),
 }
 
 // Same as SocketAddr::eq but ignores the ip if it is unspecified for testing reasons.
