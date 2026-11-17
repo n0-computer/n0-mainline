@@ -898,6 +898,31 @@ mod test {
         assert!(socket.inflight_requests.requests.capacity() <= 64);
     }
 
+    #[tokio::test]
+    #[ignore = "ANT-2026-51OFOF9U"]
+    async fn late_response_does_not_inflate_request_timeout() {
+        let mut server = KrpcSocket::client().unwrap();
+        let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
+        let mut client = KrpcSocket::client().unwrap();
+
+        server.inflight_requests.requests.push(InflightRequest {
+            tid: 8,
+            to: client.local_addr(),
+            sent_at: Instant::now() - Duration::from_secs(10),
+        });
+        let response = ResponseSpecific::Ping(PingResponseArguments {
+            responder_id: Id::random(),
+        });
+
+        client.response(server_address, 8, response);
+        client.flush().await;
+        tokio::time::timeout(Duration::from_secs(5), server.recv_batch())
+            .await
+            .unwrap();
+
+        assert!(server.inflight_requests.request_timeout() < Duration::from_secs(3));
+    }
+
     /// Datagrams that arrive in one GRO batch are handed out one by one.
     ///
     /// Where the sender supports GSO (Linux), one segmented send over loopback
