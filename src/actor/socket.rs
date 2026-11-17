@@ -818,6 +818,40 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "ANT-2026-QYMAMPLO"]
+    async fn response_from_wrong_address_keeps_request_inflight() {
+        let mut server = KrpcSocket::client().unwrap();
+        let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
+        let mut client = KrpcSocket::client().unwrap();
+        let mut stranger = KrpcSocket::client().unwrap();
+
+        server.inflight_requests.requests.push(InflightRequest {
+            tid: 8,
+            to: client.local_addr(),
+            sent_at: Instant::now(),
+        });
+        let response = ResponseSpecific::Ping(PingResponseArguments {
+            responder_id: Id::random(),
+        });
+
+        stranger.response(server_address, 8, response.clone());
+        stranger.flush().await;
+        let received = tokio::time::timeout(Duration::from_secs(5), server.recv_batch())
+            .await
+            .unwrap();
+        assert!(received.is_empty());
+        assert!(server.inflight(&8));
+
+        client.response(server_address, 8, response);
+        client.flush().await;
+        let received = tokio::time::timeout(Duration::from_secs(5), server.recv_batch())
+            .await
+            .unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0.transaction_id, 8);
+    }
+
+    #[tokio::test]
     async fn inflight_request_timeout() {
         let mut server = KrpcSocket::client().unwrap();
 
