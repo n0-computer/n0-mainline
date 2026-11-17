@@ -1344,4 +1344,11 @@ mod tests {
         let bytes = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
         assert!(Message::from_bytes(&bytes).is_err());
     }
+
+    #[test]
+    #[ignore = "ANT-2026-Q1YZQ6P8"]
+    fn test_get_signed_peers_response_with_empty_peer_returns_error() {
+        let bytes = b"d1:t2:\x00\x001:y1:r1:rd2:id20:AAAAAAAAAAAAAAAAAAAA5:token1:x5:peersl0:eee";
+        assert!(Message::from_bytes(bytes).is_err());
+    }
 }
