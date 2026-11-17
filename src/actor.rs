@@ -604,4 +604,30 @@ mod tests {
         .await
         .expect("node did not bootstrap after its hosts resolved");
     }
+
+    #[tokio::test]
+    #[ignore = "ANT-2026-2VYKUTI8"]
+    async fn foreign_ping_cannot_confirm_public_address() {
+        let config = config::Config {
+            bootstrap: vec![],
+            ..Default::default()
+        };
+        let mut actor = Actor::new(config).unwrap();
+        let public_address = SocketAddrV4::new([127, 0, 0, 1].into(), 6881);
+        actor.core.public_address = Some(public_address);
+
+        let ping = Message {
+            transaction_id: 7,
+            message_type: MessageType::Request(RequestSpecific {
+                requester_id: Id::random(),
+                request_type: RequestTypeSpecific::Ping,
+            }),
+            version: None,
+            read_only: false,
+            requester_ip: None,
+        };
+        actor.handle_incoming_message(ping, public_address);
+
+        assert!(actor.core.firewalled);
+    }
 }
