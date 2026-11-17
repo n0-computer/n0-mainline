@@ -242,6 +242,13 @@ impl KrpcSocket {
         self.inflight_requests.get(*transaction_id).is_some()
     }
 
+    /// Returns whether a request with this transaction id was sent to `to` and is still in flight.
+    pub fn sent_request_to(&self, transaction_id: u32, to: SocketAddrV4) -> bool {
+        self.inflight_requests
+            .get(transaction_id)
+            .is_some_and(|request| request.to == to)
+    }
+
     /// Send a request to the given address and return the transaction_id.
     /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn request(&mut self, address: SocketAddrV4, request: RequestSpecific) -> u32 {

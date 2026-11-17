@@ -10,9 +10,14 @@ use crate::core::supports_signed_peers;
 use crate::common::{Id, Node, RequestTypeSpecific};
 
 impl Core {
+    /// Handles an incoming request.
+    ///
+    /// `is_own_request` says whether the request's transaction id belongs to a request this
+    /// node sent to `from` and is still waiting for, which is how it recognizes its self-ping.
     pub fn handle_request(
         &mut self,
         from: SocketAddrV4,
+        is_own_request: bool,
         request_from_read_only_node: bool,
         version: Option<[u8; 4]>,
         request_specific: RequestSpecific,
@@ -24,8 +29,12 @@ impl Core {
             &request_specific,
         );
 
-        let should_repopulate_routing_tables =
-            self.does_verify_our_new_public_address_with_self_ping(from, &request_specific);
+        let should_repopulate_routing_tables = self
+            .does_verify_our_new_public_address_with_self_ping(
+                from,
+                is_own_request,
+                &request_specific,
+            );
 
         let response = if self.server_mode {
             let server = &mut self.server;
@@ -86,19 +95,23 @@ impl Core {
         }
     }
 
-    /// Check an incoming request, and if it is a PING request, with our own
-    /// id and from our own address, then we assume that the ip address we are being
-    /// told is valid.
-    // TODO: can this be spoofed? should we check the `tid` as well to be sure?
+    /// Checks whether an incoming request is our own self-ping, confirming our public address.
+    ///
+    /// The self-ping is a PING with our own id, from our own address, whose transaction id is
+    /// that of the ping we sent there. A source address alone can be spoofed, and our id is
+    /// public, so the transaction id is what shows that the ping is really ours.
     fn does_verify_our_new_public_address_with_self_ping(
         &mut self,
         from: SocketAddrV4,
+        is_own_request: bool,
         request_specific: &RequestSpecific,
     ) -> bool {
         if let Some(our_address) = self.public_address {
-            let is_ping = matches!(request_specific.request_type, RequestTypeSpecific::Ping);
+            let is_self_ping = matches!(request_specific.request_type, RequestTypeSpecific::Ping)
+                && request_specific.requester_id == *self.id()
+                && is_own_request;
 
-            if from == our_address && is_ping {
+            if from == our_address && is_self_ping {
                 self.firewalled = false;
 
                 let ipv4 = our_address.ip();

@@ -385,26 +385,17 @@ impl Core {
         &mut self,
         query: &IterativeQuery,
     ) -> Option<SocketAddrV4> {
-        if let Some(new_address) = query.best_address() {
-            self.public_address = Some(new_address);
-
-            if self.public_address.is_none()
-                || new_address
-                    != self
-                        .public_address
-                        .expect("self.public_address is not None")
-            {
-                trace!(
-                    ?new_address,
-                    "Query responses suggest a different public_address, trying to confirm.."
-                );
-
-                self.firewalled = true;
-                return Some(new_address);
-            }
+        let new_address = query.best_address()?;
+        if self.public_address == Some(new_address) {
+            return None;
         }
-
-        None
+        trace!(
+            ?new_address,
+            "Query responses suggest a different public_address, trying to confirm.."
+        );
+        self.public_address = Some(new_address);
+        self.firewalled = true;
+        Some(new_address)
     }
 
     fn cache_iterative_query(&mut self, query: &IterativeQuery, closest_responding_nodes: &[Node]) {

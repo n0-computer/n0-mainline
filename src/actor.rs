@@ -318,8 +318,10 @@ impl Actor {
     ) -> Option<(Id, Response)> {
         match message.message_type {
             MessageType::Request(request_specific) => {
+                let is_own_request = self.socket.sent_request_to(message.transaction_id, from);
                 let (response, should_repopulate_routing_tables) = self.core.handle_request(
                     from,
+                    is_own_request,
                     message.read_only,
                     message.version,
                     request_specific,
@@ -413,14 +415,15 @@ impl Actor {
         );
     }
 
-    fn ping(&mut self, address: SocketAddrV4) {
+    /// Sends a ping to `address` and returns its transaction id.
+    fn ping(&mut self, address: SocketAddrV4) -> u32 {
         self.socket.request(
             address,
             RequestSpecific {
                 requester_id: *self.id(),
                 request_type: RequestTypeSpecific::Ping,
             },
-        );
+        )
     }
 }
 
@@ -606,7 +609,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-2VYKUTI8"]
     async fn foreign_ping_cannot_confirm_public_address() {
         let config = config::Config {
             bootstrap: vec![],
@@ -629,5 +631,35 @@ mod tests {
         actor.handle_incoming_message(ping, public_address);
 
         assert!(actor.core.firewalled);
+    }
+
+    #[tokio::test]
+    async fn own_ping_confirms_public_address() {
+        let config = config::Config {
+            bootstrap: vec![],
+            ..Default::default()
+        };
+        let mut actor = Actor::new(config).unwrap();
+        let public_address = SocketAddrV4::new([127, 0, 0, 1].into(), 6881);
+        actor.core.public_address = Some(public_address);
+        let transaction_id = actor.ping(public_address);
+
+        let ping = |transaction_id, requester_id| Message {
+            transaction_id,
+            message_type: MessageType::Request(RequestSpecific {
+                requester_id,
+                request_type: RequestTypeSpecific::Ping,
+            }),
+            version: None,
+            read_only: false,
+            requester_ip: None,
+        };
+        // Our transaction id, but someone else's node id.
+        actor.handle_incoming_message(ping(transaction_id, Id::random()), public_address);
+        assert!(actor.core.firewalled);
+
+        let own_id = *actor.id();
+        actor.handle_incoming_message(ping(transaction_id, own_id), public_address);
+        assert!(!actor.core.firewalled);
     }
 }
