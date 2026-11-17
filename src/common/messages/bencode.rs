@@ -2,7 +2,7 @@
 //!
 //! KRPC messages are small dictionaries nested at most three levels deep, so this decodes
 //! into a borrowed [`Value`] tree with a hard nesting limit instead of using a general
-//! purpose (and unbounded) serde decoder.
+//! purpose (and unbounded) decoder.
 
 use std::{borrow::Cow, fmt};
 
