@@ -217,3 +217,44 @@ impl IterativeQuery {
         done
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "ANT-2026-WXBVRQOM"]
+    async fn unresponsive_nodes_do_not_crowd_out_further_nodes() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let target = Id::random();
+        let mut query = IterativeQuery::new(
+            Id::random(),
+            target,
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+        );
+        for i in 1..=MAX_BUCKET_SIZE_K as u8 {
+            let mut id = *target.as_bytes();
+            id[19] ^= i;
+            let address = SocketAddrV4::new([127, 66, 0, i].into(), 1);
+            query.add_candidate(Node::new(id.into(), address));
+        }
+        let mut id = *target.as_bytes();
+        id[0] ^= 1;
+        let further = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
+        query.add_candidate(Node::new(id.into(), further));
+
+        query.visit_closest(&mut socket);
+        while !query.is_done(&socket) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        query.visit_closest(&mut socket);
+
+        assert!(query.visited.contains(&further));
+    }
+}
