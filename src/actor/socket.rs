@@ -835,6 +835,35 @@ mod test {
         assert!(!server.inflight(&tid));
     }
 
+    #[tokio::test]
+    #[ignore = "ANT-2026-KILP8YTR"]
+    async fn timed_out_requests_do_not_accumulate() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let socket_address = SocketAddrV4::new([127, 0, 0, 1].into(), socket.local_addr().port());
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let unresponsive = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
+        let request = RequestSpecific {
+            requester_id: Id::random(),
+            request_type: RequestTypeSpecific::Ping,
+        };
+
+        for _ in 0..100 {
+            for _ in 0..20 {
+                socket.request(unresponsive, request.clone());
+            }
+            let expired = Instant::now() - 2 * socket.inflight_requests.request_timeout();
+            for request in &mut socket.inflight_requests.requests {
+                request.sent_at = expired;
+            }
+            sender.send_to(b"ping", socket_address).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), socket.recv_batch())
+                .await
+                .unwrap();
+        }
+
+        assert!(socket.inflight_requests.requests.capacity() <= 64);
+    }
+
     /// Datagrams that arrive in one GRO batch are handed out one by one.
     ///
     /// Where the sender supports GSO (Linux), one segmented send over loopback
