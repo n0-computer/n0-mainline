@@ -26,7 +26,7 @@ const DEFAULT_PORT: u16 = 6881;
 const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 /// Upper bound for the adaptive request timeout, so that slow or malicious responders can
 /// delay lookups only by a bounded amount.
-const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
