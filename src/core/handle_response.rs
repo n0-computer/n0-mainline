@@ -56,6 +56,7 @@ impl Core {
         {
             // KrpcSocket would not give us a response from the wrong address for the transaction_id
             should_add_node = true;
+            query.responded(from);
 
             if let Some(nodes) = message.get_closer_nodes() {
                 for node in nodes {

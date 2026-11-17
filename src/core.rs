@@ -340,7 +340,8 @@ impl Core {
             }
         }
 
-        let mut to_visit = query.closest_candidates();
+        // Nothing is visited yet, so no request needs to be looked up.
+        let mut to_visit = query.closest_candidates(|_| true);
 
         // Seed the query either with the closest nodes from the routing table, or the
         // bootstrapping nodes if the closest nodes are not enough.
