@@ -1337,4 +1337,11 @@ mod tests {
         let bytes = msg.to_bytes().unwrap();
         assert!(Message::from_bytes(&bytes).is_err());
     }
+
+    #[test]
+    #[ignore = "ANT-2026-DZNMMQFA"]
+    fn test_deeply_nested_message_returns_error() {
+        let bytes = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
+        assert!(Message::from_bytes(&bytes).is_err());
+    }
 }
