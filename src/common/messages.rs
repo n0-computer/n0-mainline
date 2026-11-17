@@ -4,7 +4,10 @@
 
 #![allow(missing_docs)]
 
+mod bencode;
 mod internal;
+
+pub use bencode::BencodeError;
 
 use std::convert::TryInto;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -266,7 +269,7 @@ pub struct PutMutableRequestArguments {
 }
 
 impl Message {
-    fn into_serde_message(self) -> internal::DHTMessage {
+    fn into_internal_message(self) -> internal::DHTMessage {
         internal::DHTMessage {
             transaction_id: self.transaction_id.to_be_bytes().to_vec(),
             version: self.version,
@@ -487,7 +490,7 @@ impl Message {
         }
     }
 
-    fn from_serde_message(msg: internal::DHTMessage) -> Result<Message, DecodeMessageError> {
+    fn from_internal_message(msg: internal::DHTMessage) -> Result<Message, DecodeMessageError> {
         Ok(Message {
             transaction_id: match *msg.transaction_id.as_slice() {
                 [a, b] => u16::from_be_bytes([a, b]) as u32,
@@ -715,8 +718,8 @@ impl Message {
         })
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_bencode::Error> {
-        self.clone().into_serde_message().to_bytes()
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.clone().into_internal_message().to_bytes()
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Message, DecodeMessageError> {
@@ -726,7 +729,7 @@ impl Message {
             return Err(DecodeMessageError::NotBencodeDictionary);
         }
 
-        Message::from_serde_message(internal::DHTMessage::from_bytes(bytes)?)
+        Message::from_internal_message(internal::DHTMessage::from_bytes(bytes)?)
     }
 
     /// Return the Id of the sender of the Message
@@ -865,14 +868,14 @@ fn bytes_to_nodes4<T: AsRef<[u8]>>(bytes: T) -> Result<Box<[Node]>, DecodeMessag
     Ok(to_ret.into_boxed_slice())
 }
 
-fn peers_to_bytes(peers: &[SocketAddrV4]) -> Vec<serde_bytes::ByteBuf> {
+fn peers_to_bytes(peers: &[SocketAddrV4]) -> Vec<Box<[u8]>> {
     peers
         .iter()
-        .map(|p| serde_bytes::ByteBuf::from(sockaddr_to_bytes(p)))
+        .map(|p| Box::from(sockaddr_to_bytes(p)))
         .collect()
 }
 
-fn bytes_to_peers<T: AsRef<[serde_bytes::ByteBuf]>>(
+fn bytes_to_peers<T: AsRef<[Box<[u8]>]>>(
     bytes: T,
 ) -> Result<Vec<SocketAddrV4>, DecodeMessageError> {
     let bytes = bytes.as_ref();
@@ -880,7 +883,7 @@ fn bytes_to_peers<T: AsRef<[serde_bytes::ByteBuf]>>(
 }
 
 #[allow(clippy::type_complexity)]
-fn bytes_to_signed_peers<T: AsRef<[serde_bytes::ByteBuf]>>(
+fn bytes_to_signed_peers<T: AsRef<[Box<[u8]>]>>(
     bytes: T,
 ) -> Result<Vec<([u8; 32], u64, [u8; 64])>, DecodeMessageError> {
     let bytes = bytes.as_ref();
@@ -906,10 +909,10 @@ fn bytes_to_signed_peer<T: AsRef<[u8]>>(
     ))
 }
 
-fn signed_peers_to_bytes(peers: &[([u8; 32], u64, [u8; 64])]) -> Vec<serde_bytes::ByteBuf> {
+fn signed_peers_to_bytes(peers: &[([u8; 32], u64, [u8; 64])]) -> Vec<Box<[u8]>> {
     peers
         .iter()
-        .map(|p| serde_bytes::ByteBuf::from(signed_peer_to_bytes(p)))
+        .map(|p| Box::from(signed_peer_to_bytes(p)))
         .collect()
 }
 
@@ -952,7 +955,7 @@ pub enum DecodeMessageError {
 
     #[error(transparent)]
     /// Failed to parse packet bytes
-    BencodeError(serde_bencode::Error),
+    BencodeError(BencodeError),
 
     #[error(transparent)]
     /// Invalid Id size
@@ -976,6 +979,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_deeply_nested_message() {
+        // A single datagram like this used to overflow the stack of the decoding thread.
+        let nested_lists = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
+        assert!(matches!(
+            Message::from_bytes(&nested_lists),
+            Err(DecodeMessageError::BencodeError(BencodeError::TooDeep))
+        ));
+    }
+
+    #[test]
     fn test_ping_request() {
         let original_msg = Message {
             transaction_id: 258,
@@ -988,10 +1001,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1007,10 +1020,10 @@ mod tests {
             })),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1029,10 +1042,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1051,10 +1064,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1073,10 +1086,10 @@ mod tests {
             )),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg.get_author_id(), original_msg.get_author_id());
         assert_eq!(
             parsed_msg.get_closer_nodes().map(|nodes| nodes
@@ -1105,10 +1118,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1130,10 +1143,10 @@ mod tests {
             )),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
 
         assert_eq!(parsed_msg.transaction_id, original_msg.transaction_id);
         assert_eq!(parsed_msg.version, original_msg.version);
@@ -1168,10 +1181,10 @@ mod tests {
             )),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1192,7 +1205,7 @@ mod tests {
                 },
             ),
         };
-        let parsed_msg = Message::from_serde_message(serde_message).unwrap();
+        let parsed_msg = Message::from_internal_message(serde_message).unwrap();
         assert!(matches!(
             parsed_msg.message_type,
             MessageType::Response(ResponseSpecific::NoValues(NoValuesResponseArguments { .. }))
@@ -1216,10 +1229,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1240,10 +1253,10 @@ mod tests {
             )),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1268,10 +1281,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1299,10 +1312,10 @@ mod tests {
             }),
         };
 
-        let serde_msg = original_msg.clone().into_serde_message();
-        let bytes = serde_msg.to_bytes().unwrap();
-        let parsed_serde_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_serde_message(parsed_serde_msg).unwrap();
+        let internal_msg = original_msg.clone().into_internal_message();
+        let bytes = internal_msg.to_bytes();
+        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
+        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1334,7 +1347,7 @@ mod tests {
             read_only: None,
         };
 
-        let bytes = msg.to_bytes().unwrap();
+        let bytes = msg.to_bytes();
         assert!(Message::from_bytes(&bytes).is_err());
     }
 
