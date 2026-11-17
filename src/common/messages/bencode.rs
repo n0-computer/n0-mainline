@@ -4,7 +4,7 @@
 //! into a borrowed [`Value`] tree with a hard nesting limit instead of using a general
 //! purpose (and unbounded) serde decoder.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 /// Deepest nesting of lists and dictionaries accepted when decoding.
 ///
@@ -17,7 +17,7 @@ pub(super) const MAX_DEPTH: usize = 8;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Value<'a> {
     Int(i64),
-    Bytes(&'a [u8]),
+    Bytes(Cow<'a, [u8]>),
     List(Vec<Value<'a>>),
     Dict(Dict<'a>),
 }
@@ -111,7 +111,7 @@ impl<'a> Decoder<'a> {
                 let digits = self.take_until(b'e')?;
                 Ok(Value::Int(parse_number(digits)?))
             }
-            b'0'..=b'9' => Ok(Value::Bytes(self.bytes()?)),
+            b'0'..=b'9' => Ok(Value::Bytes(Cow::Borrowed(self.bytes()?))),
             b'l' => {
                 let depth = enter(depth)?;
                 self.rest = &self.rest[1..];
@@ -189,8 +189,14 @@ fn parse_number<T: std::str::FromStr>(digits: &[u8]) -> Result<T, BencodeError> 
         .ok_or(BencodeError::InvalidNumber)
 }
 
-/// Encodes `value`, writing dictionary keys in sorted order.
-pub(super) fn encode(value: &Value<'_>, out: &mut Vec<u8>) {
+/// Encodes `value` into a new buffer, writing dictionary keys in sorted order.
+pub(super) fn encode_to_vec(value: &Value<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode(value, &mut out);
+    out
+}
+
+fn encode(value: &Value<'_>, out: &mut Vec<u8>) {
     match value {
         Value::Int(i) => {
             out.push(b'i');
@@ -228,8 +234,8 @@ fn encode_bytes(bytes: &[u8], out: &mut Vec<u8>) {
 ///
 /// Each getter fails if the key is present with a value of the wrong type; the `opt_`
 /// variants return `None` if the key is absent.
-impl<'a> Dict<'a> {
-    pub fn opt_bytes(&self, key: &'static str) -> Result<Option<&'a [u8]>, BencodeError> {
+impl Dict<'_> {
+    pub fn opt_bytes(&self, key: &'static str) -> Result<Option<&[u8]>, BencodeError> {
         match self.get(key.as_bytes()) {
             None => Ok(None),
             Some(Value::Bytes(b)) => Ok(Some(b)),
@@ -237,7 +243,7 @@ impl<'a> Dict<'a> {
         }
     }
 
-    pub fn bytes(&self, key: &'static str) -> Result<&'a [u8], BencodeError> {
+    pub fn bytes(&self, key: &'static str) -> Result<&[u8], BencodeError> {
         self.opt_bytes(key)?.ok_or(BencodeError::MissingKey(key))
     }
 
@@ -268,7 +274,7 @@ impl<'a> Dict<'a> {
         self.opt_int(key)?.ok_or(BencodeError::MissingKey(key))
     }
 
-    pub fn dict(&self, key: &'static str) -> Result<&Dict<'a>, BencodeError> {
+    pub fn dict(&self, key: &'static str) -> Result<&Self, BencodeError> {
         match self.get(key.as_bytes()) {
             None => Err(BencodeError::MissingKey(key)),
             Some(Value::Dict(d)) => Ok(d),
@@ -276,7 +282,7 @@ impl<'a> Dict<'a> {
         }
     }
 
-    pub fn list(&self, key: &'static str) -> Result<&[Value<'a>], BencodeError> {
+    pub fn list(&self, key: &'static str) -> Result<&[Value<'_>], BencodeError> {
         match self.get(key.as_bytes()) {
             None => Err(BencodeError::MissingKey(key)),
             Some(Value::List(l)) => Ok(l),
@@ -285,11 +291,11 @@ impl<'a> Dict<'a> {
     }
 
     /// A list whose items are all byte strings.
-    pub fn bytes_list(&self, key: &'static str) -> Result<Vec<Box<[u8]>>, BencodeError> {
+    pub fn bytes_list(&self, key: &'static str) -> Result<Vec<&[u8]>, BencodeError> {
         self.list(key)?
             .iter()
             .map(|v| match v {
-                Value::Bytes(b) => Ok(Box::from(*b)),
+                Value::Bytes(b) => Ok(b.as_ref()),
                 _ => Err(BencodeError::InvalidValue(key)),
             })
             .collect()
@@ -301,10 +307,7 @@ mod tests {
     use super::*;
 
     fn roundtrip(input: &[u8]) {
-        let value = decode(input).unwrap();
-        let mut out = Vec::new();
-        encode(&value, &mut out);
-        assert_eq!(out, input);
+        assert_eq!(encode_to_vec(&decode(input).unwrap()), input);
     }
 
     #[test]
@@ -322,9 +325,7 @@ mod tests {
     #[test]
     fn encode_sorts_keys() {
         let value = decode(b"d1:bi2e1:ai1ee").unwrap();
-        let mut out = Vec::new();
-        encode(&value, &mut out);
-        assert_eq!(out, b"d1:ai1e1:bi2ee");
+        assert_eq!(encode_to_vec(&value), b"d1:ai1e1:bi2ee");
     }
 
     #[test]

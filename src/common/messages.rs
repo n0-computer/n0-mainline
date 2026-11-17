@@ -5,7 +5,7 @@
 #![allow(missing_docs)]
 
 mod bencode;
-mod internal;
+mod wire;
 
 pub use bencode::BencodeError;
 
@@ -269,469 +269,6 @@ pub struct PutMutableRequestArguments {
 }
 
 impl Message {
-    fn into_internal_message(self) -> internal::DHTMessage {
-        internal::DHTMessage {
-            transaction_id: self.transaction_id.to_be_bytes().to_vec(),
-            version: self.version,
-            ip: self
-                .requester_ip
-                .map(|sockaddr| sockaddr_to_bytes(&sockaddr)),
-            read_only: if self.read_only { Some(1) } else { Some(0) },
-            variant: match self.message_type {
-                MessageType::Request(RequestSpecific {
-                    requester_id,
-                    request_type,
-                }) => internal::DHTMessageVariant::Request(match request_type {
-                    RequestTypeSpecific::Ping => internal::DHTRequestSpecific::Ping {
-                        arguments: internal::DHTPingRequestArguments {
-                            id: requester_id.into(),
-                        },
-                    },
-                    RequestTypeSpecific::FindNode(find_node_args) => {
-                        internal::DHTRequestSpecific::FindNode {
-                            arguments: internal::DHTFindNodeRequestArguments {
-                                id: requester_id.into(),
-                                target: find_node_args.target.into(),
-                            },
-                        }
-                    }
-                    RequestTypeSpecific::GetPeers(get_peers_args) => {
-                        internal::DHTRequestSpecific::GetPeers {
-                            arguments: internal::DHTGetPeersRequestArguments {
-                                id: requester_id.into(),
-                                info_hash: get_peers_args.info_hash.into(),
-                            },
-                        }
-                    }
-                    RequestTypeSpecific::GetSignedPeers(get_peers_args) => {
-                        internal::DHTRequestSpecific::GetSignedPeers {
-                            arguments: internal::DHTGetPeersRequestArguments {
-                                id: requester_id.into(),
-                                info_hash: get_peers_args.info_hash.into(),
-                            },
-                        }
-                    }
-                    RequestTypeSpecific::GetValue(get_mutable_args) => {
-                        internal::DHTRequestSpecific::GetValue {
-                            arguments: internal::DHTGetValueRequestArguments {
-                                id: requester_id.into(),
-                                target: get_mutable_args.target.into(),
-                                seq: get_mutable_args.seq,
-                            },
-                        }
-                    }
-                    RequestTypeSpecific::Put(PutRequest {
-                        token,
-                        put_request_type,
-                    }) => match put_request_type {
-                        PutRequestSpecific::AnnouncePeer(announce_peer_args) => {
-                            internal::DHTRequestSpecific::AnnouncePeer {
-                                arguments: internal::DHTAnnouncePeerRequestArguments {
-                                    id: requester_id.into(),
-                                    token,
-
-                                    info_hash: announce_peer_args.info_hash.into(),
-                                    port: announce_peer_args.port,
-                                    implied_port: if announce_peer_args.implied_port.is_some() {
-                                        Some(1)
-                                    } else {
-                                        Some(0)
-                                    },
-                                },
-                            }
-                        }
-                        PutRequestSpecific::AnnounceSignedPeer(announce_signed_peer_args) => {
-                            internal::DHTRequestSpecific::AnnounceSignedPeer {
-                                arguments: internal::DHTAnnounceSignedPeerRequestArguments {
-                                    id: requester_id.into(),
-                                    token,
-
-                                    info_hash: announce_signed_peer_args.info_hash.into(),
-                                    t: announce_signed_peer_args.t as i64,
-                                    k: announce_signed_peer_args.k,
-                                    sig: announce_signed_peer_args.sig,
-                                },
-                            }
-                        }
-                        PutRequestSpecific::PutImmutable(put_immutable_arguments) => {
-                            internal::DHTRequestSpecific::PutValue {
-                                arguments: internal::DHTPutValueRequestArguments {
-                                    id: requester_id.into(),
-                                    token,
-
-                                    target: put_immutable_arguments.target.into(),
-                                    v: put_immutable_arguments.v,
-                                    k: None,
-                                    seq: None,
-                                    sig: None,
-                                    salt: None,
-                                    cas: None,
-                                },
-                            }
-                        }
-                        PutRequestSpecific::PutMutable(put_mutable_arguments) => {
-                            internal::DHTRequestSpecific::PutValue {
-                                arguments: internal::DHTPutValueRequestArguments {
-                                    id: requester_id.into(),
-                                    token,
-
-                                    target: put_mutable_arguments.target.into(),
-                                    v: put_mutable_arguments.v,
-                                    k: Some(put_mutable_arguments.k),
-                                    seq: Some(put_mutable_arguments.seq),
-                                    sig: Some(put_mutable_arguments.sig),
-                                    salt: put_mutable_arguments.salt,
-                                    cas: put_mutable_arguments.cas,
-                                },
-                            }
-                        }
-                    },
-                }),
-
-                MessageType::Response(res) => internal::DHTMessageVariant::Response(match res {
-                    ResponseSpecific::Ping(ping_args) => internal::DHTResponseSpecific::Ping {
-                        arguments: internal::DHTPingResponseArguments {
-                            id: ping_args.responder_id.into(),
-                        },
-                    },
-                    ResponseSpecific::FindNode(find_node_args) => {
-                        internal::DHTResponseSpecific::FindNode {
-                            arguments: internal::DHTFindNodeResponseArguments {
-                                id: find_node_args.responder_id.into(),
-                                nodes: nodes4_to_bytes(&find_node_args.nodes),
-                            },
-                        }
-                    }
-                    ResponseSpecific::GetPeers(get_peers_args) => {
-                        internal::DHTResponseSpecific::GetPeers {
-                            arguments: internal::DHTGetPeersResponseArguments {
-                                id: get_peers_args.responder_id.into(),
-                                token: get_peers_args.token,
-                                nodes: get_peers_args
-                                    .nodes
-                                    .as_ref()
-                                    .map(|nodes| nodes4_to_bytes(nodes)),
-                                values: peers_to_bytes(&get_peers_args.values),
-                            },
-                        }
-                    }
-                    ResponseSpecific::GetSignedPeers(get_peers_args) => {
-                        internal::DHTResponseSpecific::GetSignedPeers {
-                            arguments: internal::DHTGetSignedPeersResponseArguments {
-                                id: get_peers_args.responder_id.into(),
-                                token: get_peers_args.token,
-                                nodes: get_peers_args
-                                    .nodes
-                                    .as_ref()
-                                    .map(|nodes| nodes4_to_bytes(nodes)),
-                                peers: signed_peers_to_bytes(&get_peers_args.peers),
-                            },
-                        }
-                    }
-                    ResponseSpecific::NoValues(no_values_arguments) => {
-                        internal::DHTResponseSpecific::NoValues {
-                            arguments: internal::DHTNoValuesResponseArguments {
-                                id: no_values_arguments.responder_id.into(),
-                                token: no_values_arguments.token,
-                                nodes: no_values_arguments
-                                    .nodes
-                                    .as_ref()
-                                    .map(|nodes| nodes4_to_bytes(nodes)),
-                            },
-                        }
-                    }
-                    ResponseSpecific::GetImmutable(get_immutable_args) => {
-                        internal::DHTResponseSpecific::GetImmutable {
-                            arguments: internal::DHTGetImmutableResponseArguments {
-                                id: get_immutable_args.responder_id.into(),
-                                token: get_immutable_args.token,
-                                nodes: get_immutable_args
-                                    .nodes
-                                    .as_ref()
-                                    .map(|nodes| nodes4_to_bytes(nodes)),
-                                v: get_immutable_args.v,
-                            },
-                        }
-                    }
-                    ResponseSpecific::GetMutable(get_mutable_args) => {
-                        internal::DHTResponseSpecific::GetMutable {
-                            arguments: internal::DHTGetMutableResponseArguments {
-                                id: get_mutable_args.responder_id.into(),
-                                token: get_mutable_args.token,
-                                nodes: get_mutable_args
-                                    .nodes
-                                    .as_ref()
-                                    .map(|nodes| nodes4_to_bytes(nodes)),
-                                v: get_mutable_args.v,
-                                k: get_mutable_args.k,
-                                seq: get_mutable_args.seq,
-                                sig: get_mutable_args.sig,
-                            },
-                        }
-                    }
-                    ResponseSpecific::NoMoreRecentValue(args) => {
-                        internal::DHTResponseSpecific::NoMoreRecentValue {
-                            arguments: internal::DHTNoMoreRecentValueResponseArguments {
-                                id: args.responder_id.into(),
-                                token: args.token,
-                                nodes: args.nodes.as_ref().map(|nodes| nodes4_to_bytes(nodes)),
-                                seq: args.seq,
-                            },
-                        }
-                    }
-                }),
-
-                MessageType::Error(err) => {
-                    internal::DHTMessageVariant::Error(internal::DHTErrorSpecific {
-                        error_info: (err.code, err.description),
-                    })
-                }
-            },
-        }
-    }
-
-    fn from_internal_message(msg: internal::DHTMessage) -> Result<Message, DecodeMessageError> {
-        Ok(Message {
-            transaction_id: match *msg.transaction_id.as_slice() {
-                [a, b] => u16::from_be_bytes([a, b]) as u32,
-                [a, b, c, d] => u32::from_be_bytes([a, b, c, d]),
-                _ => return Err(DecodeMessageError::InvalidTransactionIdSize),
-            },
-            version: msg.version,
-            requester_ip: match msg.ip {
-                Some(ip) => Some(bytes_to_sockaddr(ip)?),
-                _ => None,
-            },
-            read_only: if let Some(read_only) = msg.read_only {
-                read_only > 0
-            } else {
-                false
-            },
-            message_type: match msg.variant {
-                internal::DHTMessageVariant::Request(req_variant) => {
-                    MessageType::Request(match req_variant {
-                        internal::DHTRequestSpecific::Ping { arguments } => RequestSpecific {
-                            requester_id: Id::from_bytes(arguments.id)?,
-                            request_type: RequestTypeSpecific::Ping,
-                        },
-                        internal::DHTRequestSpecific::FindNode { arguments } => RequestSpecific {
-                            requester_id: Id::from_bytes(arguments.id)?,
-                            request_type: RequestTypeSpecific::FindNode(FindNodeRequestArguments {
-                                target: Id::from_bytes(arguments.target)?,
-                            }),
-                        },
-                        internal::DHTRequestSpecific::GetPeers { arguments } => RequestSpecific {
-                            requester_id: Id::from_bytes(arguments.id)?,
-                            request_type: RequestTypeSpecific::GetPeers(GetPeersRequestArguments {
-                                info_hash: Id::from_bytes(arguments.info_hash)?,
-                            }),
-                        },
-                        internal::DHTRequestSpecific::GetSignedPeers { arguments } => {
-                            RequestSpecific {
-                                requester_id: Id::from_bytes(arguments.id)?,
-                                request_type: RequestTypeSpecific::GetSignedPeers(
-                                    GetPeersRequestArguments {
-                                        info_hash: Id::from_bytes(arguments.info_hash)?,
-                                    },
-                                ),
-                            }
-                        }
-
-                        internal::DHTRequestSpecific::GetValue { arguments } => RequestSpecific {
-                            requester_id: Id::from_bytes(arguments.id)?,
-
-                            request_type: RequestTypeSpecific::GetValue(GetValueRequestArguments {
-                                target: Id::from_bytes(arguments.target)?,
-                                seq: arguments.seq,
-                                salt: None,
-                            }),
-                        },
-                        internal::DHTRequestSpecific::AnnouncePeer { arguments } => {
-                            RequestSpecific {
-                                requester_id: Id::from_bytes(arguments.id)?,
-                                request_type: RequestTypeSpecific::Put(PutRequest {
-                                    token: arguments.token,
-                                    put_request_type: PutRequestSpecific::AnnouncePeer(
-                                        AnnouncePeerRequestArguments {
-                                            implied_port: arguments
-                                                .implied_port
-                                                .map(|implied_port| implied_port != 0),
-                                            info_hash: arguments.info_hash.into(),
-                                            port: arguments.port,
-                                        },
-                                    ),
-                                }),
-                            }
-                        }
-                        internal::DHTRequestSpecific::AnnounceSignedPeer { arguments } => {
-                            RequestSpecific {
-                                requester_id: Id::from_bytes(arguments.id)?,
-
-                                request_type: RequestTypeSpecific::Put(PutRequest {
-                                    token: arguments.token,
-                                    put_request_type: PutRequestSpecific::AnnounceSignedPeer(
-                                        AnnounceSignedPeerRequestArguments {
-                                            info_hash: Id::from_bytes(arguments.info_hash)?,
-                                            t: arguments.t as u64,
-                                            k: arguments.k,
-                                            sig: arguments.sig,
-                                        },
-                                    ),
-                                }),
-                            }
-                        }
-                        internal::DHTRequestSpecific::PutValue { arguments } => {
-                            if let Some(k) = arguments.k {
-                                let (Some(seq), Some(sig)) = (arguments.seq, arguments.sig) else {
-                                    return Err(
-                                        DecodeMessageError::MissingMutablePutSequenceOrSignature,
-                                    );
-                                };
-                                RequestSpecific {
-                                    requester_id: Id::from_bytes(arguments.id)?,
-
-                                    request_type: RequestTypeSpecific::Put(PutRequest {
-                                        token: arguments.token,
-                                        put_request_type: PutRequestSpecific::PutMutable(
-                                            PutMutableRequestArguments {
-                                                target: Id::from_bytes(arguments.target)?,
-                                                v: arguments.v,
-                                                k,
-                                                seq,
-                                                sig,
-                                                salt: arguments.salt,
-                                                cas: arguments.cas,
-                                            },
-                                        ),
-                                    }),
-                                }
-                            } else {
-                                RequestSpecific {
-                                    requester_id: Id::from_bytes(arguments.id)?,
-
-                                    request_type: RequestTypeSpecific::Put(PutRequest {
-                                        token: arguments.token,
-                                        put_request_type: PutRequestSpecific::PutImmutable(
-                                            PutImmutableRequestArguments {
-                                                target: Id::from_bytes(arguments.target)?,
-                                                v: arguments.v,
-                                            },
-                                        ),
-                                    }),
-                                }
-                            }
-                        }
-                    })
-                }
-
-                internal::DHTMessageVariant::Response(res_variant) => {
-                    MessageType::Response(match res_variant {
-                        internal::DHTResponseSpecific::Ping { arguments } => {
-                            ResponseSpecific::Ping(PingResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                            })
-                        }
-                        internal::DHTResponseSpecific::FindNode { arguments } => {
-                            ResponseSpecific::FindNode(FindNodeResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                nodes: bytes_to_nodes4(&arguments.nodes)?,
-                            })
-                        }
-                        internal::DHTResponseSpecific::GetPeers { arguments } => {
-                            ResponseSpecific::GetPeers(GetPeersResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                token: arguments.token,
-                                nodes: match arguments.nodes {
-                                    Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                    None => None,
-                                },
-                                values: bytes_to_peers(arguments.values)?,
-                            })
-                        }
-                        internal::DHTResponseSpecific::GetSignedPeers { arguments } => {
-                            ResponseSpecific::GetSignedPeers(GetSignedPeersResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                token: arguments.token,
-                                nodes: match arguments.nodes {
-                                    Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                    None => None,
-                                },
-                                peers: bytes_to_signed_peers(arguments.peers)?,
-                            })
-                        }
-                        internal::DHTResponseSpecific::NoValues { arguments } => {
-                            ResponseSpecific::NoValues(NoValuesResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                token: arguments.token,
-                                nodes: match arguments.nodes {
-                                    Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                    None => None,
-                                },
-                            })
-                        }
-                        internal::DHTResponseSpecific::GetImmutable { arguments } => {
-                            ResponseSpecific::GetImmutable(GetImmutableResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                token: arguments.token,
-                                nodes: match arguments.nodes {
-                                    Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                    None => None,
-                                },
-                                v: arguments.v,
-                            })
-                        }
-                        internal::DHTResponseSpecific::GetMutable { arguments } => {
-                            ResponseSpecific::GetMutable(GetMutableResponseArguments {
-                                responder_id: Id::from_bytes(arguments.id)?,
-                                token: arguments.token,
-                                nodes: match arguments.nodes {
-                                    Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                    None => None,
-                                },
-                                v: arguments.v,
-                                k: arguments.k,
-                                seq: arguments.seq,
-                                sig: arguments.sig,
-                            })
-                        }
-                        internal::DHTResponseSpecific::NoMoreRecentValue { arguments } => {
-                            ResponseSpecific::NoMoreRecentValue(
-                                NoMoreRecentValueResponseArguments {
-                                    responder_id: Id::from_bytes(arguments.id)?,
-                                    token: arguments.token,
-                                    nodes: match arguments.nodes {
-                                        Some(nodes) => Some(bytes_to_nodes4(nodes)?),
-                                        None => None,
-                                    },
-                                    seq: arguments.seq,
-                                },
-                            )
-                        }
-                    })
-                }
-
-                internal::DHTMessageVariant::Error(err) => MessageType::Error(ErrorSpecific {
-                    code: err.error_info.0,
-                    description: err.error_info.1,
-                }),
-            },
-        })
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.clone().into_internal_message().to_bytes()
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Message, DecodeMessageError> {
-        if bytes.len() < 15 {
-            return Err(DecodeMessageError::TooShort);
-        } else if bytes[0] != 100 {
-            return Err(DecodeMessageError::NotBencodeDictionary);
-        }
-
-        Message::from_internal_message(internal::DHTMessage::from_bytes(bytes)?)
-    }
-
     /// Return the Id of the sender of the Message
     ///
     /// This is less straightforward than it seems because not *all* messages are sent
@@ -868,29 +405,6 @@ fn bytes_to_nodes4<T: AsRef<[u8]>>(bytes: T) -> Result<Box<[Node]>, DecodeMessag
     Ok(to_ret.into_boxed_slice())
 }
 
-fn peers_to_bytes(peers: &[SocketAddrV4]) -> Vec<Box<[u8]>> {
-    peers
-        .iter()
-        .map(|p| Box::from(sockaddr_to_bytes(p)))
-        .collect()
-}
-
-fn bytes_to_peers<T: AsRef<[Box<[u8]>]>>(
-    bytes: T,
-) -> Result<Vec<SocketAddrV4>, DecodeMessageError> {
-    let bytes = bytes.as_ref();
-    bytes.iter().map(bytes_to_sockaddr).collect()
-}
-
-#[allow(clippy::type_complexity)]
-fn bytes_to_signed_peers<T: AsRef<[Box<[u8]>]>>(
-    bytes: T,
-) -> Result<Vec<([u8; 32], u64, [u8; 64])>, DecodeMessageError> {
-    let bytes = bytes.as_ref();
-
-    bytes.iter().map(bytes_to_signed_peer).collect()
-}
-
 fn bytes_to_signed_peer<T: AsRef<[u8]>>(
     bytes: T,
 ) -> Result<([u8; 32], u64, [u8; 64]), DecodeMessageError> {
@@ -907,13 +421,6 @@ fn bytes_to_signed_peer<T: AsRef<[u8]>>(
         u64::from_be_bytes(t),
         bytes[40..104].try_into().expect("infallible"),
     ))
-}
-
-fn signed_peers_to_bytes(peers: &[([u8; 32], u64, [u8; 64])]) -> Vec<Box<[u8]>> {
-    peers
-        .iter()
-        .map(|p| Box::from(signed_peer_to_bytes(p)))
-        .collect()
 }
 
 fn signed_peer_to_bytes(peer: &([u8; 32], u64, [u8; 64])) -> [u8; 104] {
@@ -1001,10 +508,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1020,10 +524,7 @@ mod tests {
             })),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1042,10 +543,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1064,10 +562,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1086,10 +581,7 @@ mod tests {
             )),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg.get_author_id(), original_msg.get_author_id());
         assert_eq!(
             parsed_msg.get_closer_nodes().map(|nodes| nodes
@@ -1118,10 +610,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1143,10 +632,7 @@ mod tests {
             )),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
 
         assert_eq!(parsed_msg.transaction_id, original_msg.transaction_id);
         assert_eq!(parsed_msg.version, original_msg.version);
@@ -1181,31 +667,16 @@ mod tests {
             )),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
     #[test]
     fn test_get_peers_response_neither() {
-        let serde_message = internal::DHTMessage {
-            ip: None,
-            read_only: None,
-            transaction_id: vec![1, 2], // test u16
-            version: None,
-            variant: internal::DHTMessageVariant::Response(
-                internal::DHTResponseSpecific::NoValues {
-                    arguments: internal::DHTNoValuesResponseArguments {
-                        id: Id::random().into(),
-                        token: vec![0, 1].into(),
-                        nodes: None,
-                    },
-                },
-            ),
-        };
-        let parsed_msg = Message::from_internal_message(serde_message).unwrap();
+        // a response with a token but neither values nor nodes, and a u16 transaction id
+        let bytes = b"d1:rd2:id20:aaaaaaaaaaaaaaaaaaaa5:token2:\x00\x01e1:t2:\x01\x021:y1:re";
+        let parsed_msg = Message::from_bytes(bytes).unwrap();
+        assert_eq!(parsed_msg.transaction_id, 0x0102);
         assert!(matches!(
             parsed_msg.message_type,
             MessageType::Response(ResponseSpecific::NoValues(NoValuesResponseArguments { .. }))
@@ -1229,10 +700,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1253,10 +721,7 @@ mod tests {
             )),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1281,10 +746,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1312,10 +774,7 @@ mod tests {
             }),
         };
 
-        let internal_msg = original_msg.clone().into_internal_message();
-        let bytes = internal_msg.to_bytes();
-        let parsed_internal_msg = internal::DHTMessage::from_bytes(&bytes).unwrap();
-        let parsed_msg = Message::from_internal_message(parsed_internal_msg).unwrap();
+        let parsed_msg = Message::from_bytes(&original_msg.to_bytes()).unwrap();
         assert_eq!(parsed_msg, original_msg);
     }
 
@@ -1327,28 +786,9 @@ mod tests {
     /// Thanks to daniel@makrotopia.org for disclosure.
     #[test]
     fn test_put_with_key_but_no_seq_does_not_panic() {
-        let msg = internal::DHTMessage {
-            transaction_id: vec![0, 0, 0, 0],
-            version: None,
-            variant: internal::DHTMessageVariant::Request(internal::DHTRequestSpecific::PutValue {
-                arguments: internal::DHTPutValueRequestArguments {
-                    id: [1; 20],
-                    target: [0x11; 20],
-                    token: (*b"ZZZZ").into(),
-                    v: (*b"hi").into(),
-                    k: Some([0x33; 32]),
-                    sig: None,
-                    seq: None,
-                    cas: None,
-                    salt: None,
-                },
-            }),
-            ip: None,
-            read_only: None,
-        };
-
-        let bytes = msg.to_bytes();
-        assert!(Message::from_bytes(&bytes).is_err());
+        // a mutable put with a key but neither seq nor sig
+        let bytes = b"d1:ad2:id20:aaaaaaaaaaaaaaaaaaaa1:k32:kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk6:target20:tttttttttttttttttttt5:token4:ZZZZ1:v2:hie1:q3:put1:t4:\x00\x00\x00\x001:y1:qe";
+        assert!(Message::from_bytes(bytes).is_err());
     }
 
     #[test]
