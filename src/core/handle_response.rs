@@ -235,3 +235,56 @@ impl Core {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        actor::socket::KrpcSocket,
+        common::{FindNodeRequestArguments, FindNodeResponseArguments},
+        core::GetRequestSpecific,
+    };
+
+    #[tokio::test]
+    #[ignore = "ANT-2026-QRSC5W38"]
+    async fn internet_node_cannot_aim_requests_at_local_network() {
+        let mut core = Core::new(Id::random(), vec![], false, Default::default());
+        let mut socket = KrpcSocket::client().unwrap();
+        let target = Id::random();
+        let (mut query, _) = core
+            .create_iterative_query(
+                GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+                None,
+            )
+            .unwrap();
+        let internet = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
+        query.visit(&mut socket, internet);
+        core.iterative_queries.insert(target, query);
+
+        let public = Node::new(
+            Id::random(),
+            SocketAddrV4::new([198, 51, 100, 1].into(), 6881),
+        );
+        let local = Node::new(
+            Id::random(),
+            SocketAddrV4::new([192, 168, 1, 2].into(), 6881),
+        );
+        let response = Message {
+            transaction_id: 0,
+            version: None,
+            requester_ip: None,
+            read_only: false,
+            message_type: MessageType::Response(ResponseSpecific::FindNode(
+                FindNodeResponseArguments {
+                    responder_id: Id::random(),
+                    nodes: [public.clone(), local.clone()].into(),
+                },
+            )),
+        };
+        core.handle_response(internet, response);
+
+        let closest = core.iterative_queries[&target].closest().nodes();
+        assert!(closest.contains(&public));
+        assert!(!closest.contains(&local));
+    }
+}
