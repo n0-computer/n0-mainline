@@ -451,11 +451,10 @@ impl Dht {
         let mut stream = self.get_mutable(public_key, salt, None).await?;
 
         while let Some(item) = stream.0.recv().await {
-            if let Some(mr) = &most_recent {
-                if item.seq() == mr.seq && item.value() > &*mr.value {
-                    most_recent = Some(item)
-                }
-            } else {
+            if most_recent
+                .as_ref()
+                .is_none_or(|mr| is_more_recent(&item, mr))
+            {
                 most_recent = Some(item);
             }
         }
@@ -624,6 +623,11 @@ impl From<ActorShutdown> for PutError {
     fn from(_: ActorShutdown) -> Self {
         PutError::Query(PutQueryError::Shutdown)
     }
+}
+
+/// Returns whether `item` should replace `current` as the most recent item.
+fn is_more_recent(item: &MutableItem, current: &MutableItem) -> bool {
+    item.seq() == current.seq() && item.value() > current.value()
 }
 
 #[cfg(test)]
@@ -1161,5 +1165,19 @@ mod test {
 
             assert_eq!(keys, expected_keys);
         }
+    }
+
+    #[test]
+    #[ignore = "ANT-2026-6TOY5DPL"]
+    fn higher_seq_is_more_recent() {
+        let signer = SigningKey::from_bytes(&[7; 32]);
+        let item = |seq, value: &[u8]| MutableItem::new(&signer, value, seq, None);
+        // A higher seq wins, whatever the value.
+        assert!(is_more_recent(&item(2, b"a"), &item(1, b"b")));
+        assert!(!is_more_recent(&item(1, b"b"), &item(2, b"a")));
+        // For equal seq the greater value wins, so all readers settle on the same item.
+        assert!(is_more_recent(&item(1, b"b"), &item(1, b"a")));
+        assert!(!is_more_recent(&item(1, b"a"), &item(1, b"b")));
+        assert!(!is_more_recent(&item(1, b"a"), &item(1, b"a")));
     }
 }
