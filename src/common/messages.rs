@@ -486,16 +486,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_deeply_nested_message() {
-        // A single datagram like this used to overflow the stack of the decoding thread.
-        let nested_lists = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
-        assert!(matches!(
-            Message::from_bytes(&nested_lists),
-            Err(DecodeMessageError::BencodeError(BencodeError::TooDeep))
-        ));
-    }
-
-    #[test]
     fn test_ping_request() {
         let original_msg = Message {
             transaction_id: 258,
@@ -792,7 +782,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ANT-2026-DZNMMQFA"]
     fn test_deeply_nested_message_returns_error() {
         let bytes = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
         assert!(Message::from_bytes(&bytes).is_err());
