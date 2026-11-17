@@ -145,7 +145,7 @@ fn datagrams(batch: &[u8], len: usize, stride: usize) -> impl Iterator<Item = &[
 #[derive(Debug)]
 pub struct KrpcSocket {
     io: UdpIo,
-    pub(crate) server_mode: bool,
+    pub(crate) mode: crate::Mode,
     local_addr: SocketAddrV4,
 
     inflight_requests: InflightRequests,
@@ -199,7 +199,7 @@ impl KrpcSocket {
 
         Ok(Self {
             io,
-            server_mode: config.server_mode,
+            mode: config.mode,
             inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
@@ -217,7 +217,7 @@ impl KrpcSocket {
     #[cfg(test)]
     pub(crate) fn server() -> io::Result<Self> {
         Self::new(&Config {
-            server_mode: true,
+            mode: crate::Mode::Server,
             ..Default::default()
         })
     }
@@ -436,7 +436,7 @@ impl KrpcSocket {
             transaction_id,
             message_type: MessageType::Request(message),
             version: Some(self.version()),
-            read_only: !self.server_mode,
+            read_only: self.mode == crate::Mode::Client,
             requester_ip: None,
         }
     }
@@ -452,7 +452,7 @@ impl KrpcSocket {
             transaction_id: request_tid,
             message_type: message,
             version: Some(self.version()),
-            read_only: !self.server_mode,
+            read_only: self.mode == crate::Mode::Client,
             // BEP_0042 Only relevant in responses.
             requester_ip: Some(requester_ip),
         }

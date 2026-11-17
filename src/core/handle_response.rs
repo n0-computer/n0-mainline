@@ -248,7 +248,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "ANT-2026-QRSC5W38"]
     async fn internet_node_cannot_aim_requests_at_local_network() {
-        let mut core = Core::new(Id::random(), vec![], false, Default::default());
+        let mut core = Core::new(
+            Id::random(),
+            vec![],
+            crate::Mode::Client,
+            Default::default(),
+        );
         let mut socket = KrpcSocket::client().unwrap();
         let target = Id::random();
         let (mut query, _) = core

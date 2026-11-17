@@ -22,10 +22,10 @@ pub struct Config {
     pub port: Option<u16>,
     /// Server to respond to incoming Requests
     pub server_settings: ServerSettings,
-    /// Whether or not to start in server mode from the get go.
+    /// The mode to run in.
     ///
-    /// Defaults to false where it will run in [Adaptive mode](https://github.com/nuhvi/mainline?tab=readme-ov-file#adaptive-mode).
-    pub server_mode: bool,
+    /// Defaults to client mode, without automatic promotion to server mode.
+    pub mode: crate::Mode,
     /// A known public IPv4 address for this node to generate
     /// a secure node Id from according to [BEP_0042](https://www.bittorrent.org/beps/bep_0042.html)
     ///
@@ -48,7 +48,7 @@ impl Default for Config {
                 .collect(),
             port: None,
             server_settings: Default::default(),
-            server_mode: false,
+            mode: crate::Mode::Client,
             public_ip: None,
             #[cfg(test)]
             disable_announce_signed_peers: false,
