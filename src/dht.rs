@@ -627,7 +627,9 @@ impl From<ActorShutdown> for PutError {
 
 /// Returns whether `item` should replace `current` as the most recent item.
 fn is_more_recent(item: &MutableItem, current: &MutableItem) -> bool {
-    item.seq() == current.seq() && item.value() > current.value()
+    // A higher seq wins. For equal seq the greater value wins, so that all readers settle on
+    // the same item.
+    (item.seq(), item.value()) > (current.seq(), current.value())
 }
 
 #[cfg(test)]
@@ -1168,7 +1170,6 @@ mod test {
     }
 
     #[test]
-    #[ignore = "ANT-2026-6TOY5DPL"]
     fn higher_seq_is_more_recent() {
         let signer = SigningKey::from_bytes(&[7; 32]);
         let item = |seq, value: &[u8]| MutableItem::new(&signer, value, seq, None);
