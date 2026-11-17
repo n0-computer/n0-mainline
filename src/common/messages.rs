@@ -891,18 +891,18 @@ fn bytes_to_signed_peers<T: AsRef<[serde_bytes::ByteBuf]>>(
 fn bytes_to_signed_peer<T: AsRef<[u8]>>(
     bytes: T,
 ) -> Result<([u8; 32], u64, [u8; 64]), DecodeMessageError> {
-    let bytes = bytes.as_ref();
-
-    if !bytes.len().is_multiple_of(104) {
-        return Err(DecodeMessageError::InvalidSignedPeersEncodingLength);
-    }
-
-    let t: [u8; 8] = bytes[32..40].try_into().expect("infallible");
+    // Each entry is exactly one record as written by `signed_peer_to_bytes`.
+    let bytes: &[u8; 104] = bytes
+        .as_ref()
+        .try_into()
+        .map_err(|_| DecodeMessageError::InvalidSignedPeersEncodingLength)?;
+    let (key, rest) = bytes.split_at(32);
+    let (t, sig) = rest.split_at(8);
 
     Ok((
-        bytes[0..32].try_into().expect("infallible"),
-        u64::from_be_bytes(t),
-        bytes[40..104].try_into().expect("infallible"),
+        key.try_into().expect("32 bytes"),
+        u64::from_be_bytes(t.try_into().expect("8 bytes")),
+        sig.try_into().expect("64 bytes"),
     ))
 }
 
@@ -974,6 +974,27 @@ pub enum DecodeMessageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_signed_peers_entry_of_wrong_length() {
+        let response = |entry: &[u8]| {
+            let mut bytes = b"d1:rd2:id20:abcdefghij01234567895:peersl".to_vec();
+            bytes.extend_from_slice(format!("{}:", entry.len()).as_bytes());
+            bytes.extend_from_slice(entry);
+            bytes.extend_from_slice(b"e5:token2:tke1:t2:aa1:y1:re");
+            Message::from_bytes(&bytes)
+        };
+        assert!(response(&[7; 104]).is_ok());
+        for len in [0, 40, 103, 105, 208] {
+            assert!(
+                matches!(
+                    response(&vec![7; len]),
+                    Err(DecodeMessageError::InvalidSignedPeersEncodingLength)
+                ),
+                "entry of {len} bytes"
+            );
+        }
+    }
 
     #[test]
     fn test_ping_request() {
