@@ -22,9 +22,6 @@ unstable_signed_peers = []
 
 [dependencies]
 rand = "0.10"
-serde_bencode = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11.15"
 crc = "3"
 sha1_smol = "1"
 ed25519-dalek = ">=3.0.0-rc.0,<4.0.0"
@@ -37,6 +34,8 @@ n0-error = "1.0.0"
 noq-udp = "1.0.0"
 
 [dev-dependencies]
+proptest = "1.11.0"
+test-strategy = "0.4.5"
 clap = { version = "4.5.29", features = ["derive"] }
 futures = "0.3.31"
 tracing-subscriber = { version = "0.3", features = ["env-filter"]}
