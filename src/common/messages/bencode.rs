@@ -308,7 +308,99 @@ impl Dict<'_> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{collection, prelude::*};
+    use test_strategy::proptest;
+
     use super::*;
+
+    fn values() -> impl Strategy<Value = Value<'static>> {
+        let leaf = prop_oneof![
+            any::<i64>().prop_map(Value::Int),
+            collection::vec(any::<u8>(), 0..32).prop_map(|bytes| Value::Bytes(Cow::Owned(bytes))),
+        ];
+        leaf.prop_recursive(3, 32, 4, |inner| {
+            // Static keys keep the generated tree owned without leaking allocations.
+            // Include empty and non-UTF-8 keys, which bencode permits.
+            let keys = prop::sample::select(vec![
+                &b""[..],
+                &b"a"[..],
+                &b"aa"[..],
+                &b"b"[..],
+                &b"\xff"[..],
+            ]);
+            prop_oneof![
+                collection::vec(inner.clone(), 0..4).prop_map(Value::List),
+                collection::btree_map(keys, inner, 0..4)
+                    .prop_map(|entries| Value::Dict(Dict(entries.into_iter().collect()))),
+            ]
+        })
+    }
+
+    #[proptest]
+    fn value_roundtrip_and_truncation(#[strategy(values())] value: Value<'static>, cut: usize) {
+        let encoded = encode_to_vec(&value);
+        assert_eq!(decode(&encoded).unwrap(), value);
+        // A proper prefix of a single encoded value must never decode successfully.
+        assert!(decode(&encoded[..cut % encoded.len()]).is_err());
+    }
+
+    #[proptest]
+    fn dictionary_order_and_duplicates(
+        #[strategy(collection::btree_map(collection::vec(any::<u8>(), 0..16), any::<i64>(), 1..8))]
+        entries: std::collections::BTreeMap<Vec<u8>, i64>,
+    ) {
+        let dict = Dict(
+            entries
+                .iter()
+                .map(|(k, v)| (k.as_slice(), Value::Int(*v)))
+                .collect(),
+        );
+        let canonical = encode_to_vec(&Value::Dict(dict.clone()));
+        // Build unsorted wire input directly: the encoder would sort it for us.
+        let mut wire = vec![b'd'];
+        for (key, value) in dict.0.iter().rev() {
+            encode_bytes(key, &mut wire);
+            encode(value, &mut wire);
+        }
+        wire.push(b'e');
+        assert_eq!(encode_to_vec(&decode(&wire).unwrap()), canonical);
+        wire.pop();
+        let (key, value) = &dict.0[0];
+        encode_bytes(key, &mut wire);
+        encode(value, &mut wire);
+        wire.push(b'e');
+        assert_eq!(decode(&wire), Err(BencodeError::DuplicateKey));
+    }
+
+    #[proptest]
+    fn arbitrary_input_is_safe_and_canonicalizes(
+        #[strategy(collection::vec(any::<u8>(), 0..2048))] input: Vec<u8>,
+    ) {
+        // Any input may be rejected, but decoding must not panic. Accepted input
+        // must have a stable canonical encoding (trailing bytes are allowed).
+        if let Ok(value) = decode(&input) {
+            let canonical = encode_to_vec(&value);
+            assert_eq!(encode_to_vec(&decode(&canonical).unwrap()), canonical);
+        }
+    }
+
+    #[proptest]
+    fn mixed_container_depth_limit(
+        #[strategy(collection::vec(any::<bool>(), 0..=16))] containers: Vec<bool>,
+        value: i64,
+    ) {
+        let mut wire = Vec::new();
+        for dict in &containers {
+            wire.extend_from_slice(if *dict { b"d1:k" } else { b"l" });
+        }
+        encode(&Value::Int(value), &mut wire);
+        wire.extend(std::iter::repeat_n(b'e', containers.len()));
+        if containers.len() <= MAX_DEPTH {
+            assert!(decode(&wire).is_ok());
+        } else {
+            assert_eq!(decode(&wire), Err(BencodeError::TooDeep));
+        }
+    }
 
     fn as_dict(value: Value<'_>) -> Dict<'_> {
         match value {
