@@ -318,6 +318,10 @@ impl Actor {
                     _ => {}
                 }
 
+                for address in self.core.take_pending_pings() {
+                    self.ping(address);
+                }
+
                 None
             }
             _ => self.core.handle_response(from, message),

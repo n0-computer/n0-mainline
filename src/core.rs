@@ -32,6 +32,10 @@ pub const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 pub const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub const MAX_CACHED_ITERATIVE_QUERIES: usize = 1000;
+/// How many requesters we remember having pinged.
+const MAX_RECENTLY_PINGED: usize = 1000;
+/// Minimum time before we ping the same requester again.
+const REQUESTER_PING_INTERVAL: Duration = Duration::from_secs(10);
 
 pub const VERSION: [u8; 4] = [82, 83, 0, 6]; // "RS" version 06
 //
@@ -73,6 +77,11 @@ pub struct Core {
     pub server: Server,
     pub public_address: Option<SocketAddrV4>,
     pub mode: crate::Mode,
+
+    /// Requesters to ping, so that their responses can add them to the routing tables.
+    pending_pings: Vec<SocketAddrV4>,
+    /// When we last pinged a requester, to not ping it for every request.
+    recently_pinged: LruCache<SocketAddrV4, Instant>,
 }
 
 impl Core {
@@ -97,11 +106,21 @@ impl Core {
             server: Server::new(server_settings),
             public_address: None,
             mode,
+            pending_pings: Vec::new(),
+            recently_pinged: LruCache::new(
+                NonZeroUsize::new(MAX_RECENTLY_PINGED)
+                    .expect("MAX_RECENTLY_PINGED is NonZeroUsize"),
+            ),
         }
     }
 
     fn id(&self) -> &Id {
         self.routing_table.id()
+    }
+
+    /// Takes the addresses that should be pinged now.
+    pub fn take_pending_pings(&mut self) -> Vec<SocketAddrV4> {
+        std::mem::take(&mut self.pending_pings)
     }
 
     pub fn should_ping_table(&self) -> bool {
