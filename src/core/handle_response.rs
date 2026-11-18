@@ -280,7 +280,7 @@ mod tests {
             )
             .unwrap();
         let internet = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
-        query.visit(&mut socket, internet);
+        let tid = query.visit(&mut socket, internet);
         core.iterative_queries.insert(target, query);
 
         let public = Node::new(
@@ -292,7 +292,7 @@ mod tests {
             SocketAddrV4::new([192, 168, 1, 2].into(), 6881),
         );
         let response = Message {
-            transaction_id: 0,
+            transaction_id: tid,
             version: None,
             requester_ip: None,
             read_only: false,
