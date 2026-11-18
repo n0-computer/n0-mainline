@@ -185,20 +185,10 @@ impl FromStr for Id {
     type Err = DecodeIdError;
 
     fn from_str(s: &str) -> Result<Id, DecodeIdError> {
-        if !s.len().is_multiple_of(2) {
-            return Err(DecodeIdError::OddNumberOfCharacters);
-        }
-
-        let mut bytes = Vec::with_capacity(s.len() / 2);
-
-        for i in 0..s.len() / 2 {
-            let byte_str = &s[i * 2..(i * 2) + 2];
-            if let Ok(byte) = u8::from_str_radix(byte_str, 16) {
-                bytes.push(byte);
-            } else {
-                return Err(DecodeIdError::InvalidHexCharacter(byte_str.into()));
-            }
-        }
+        let bytes = hex::decode(s).map_err(|err| match err {
+            hex::FromHexError::OddLength => DecodeIdError::OddNumberOfCharacters,
+            _ => DecodeIdError::InvalidHexCharacter(s.into()),
+        })?;
 
         Ok(Id::from_bytes(bytes)?)
     }
@@ -240,6 +230,24 @@ pub enum DecodeIdError {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn rejects_unicode_hex_without_panicking() {
+        for prefix in ["💥", "a💥", "é", "aé", "€", "a€"] {
+            let input = format!("{prefix}{}", "a".repeat(40 - prefix.len()));
+            assert!(matches!(
+                input.parse::<Id>(),
+                Err(DecodeIdError::InvalidHexCharacter(_))
+            ));
+        }
+    }
+
+    #[test_strategy::proptest]
+    fn arbitrary_text_id_does_not_panic(input: String) {
+        if let Ok(id) = input.parse::<Id>() {
+            assert_eq!(id.to_string().parse::<Id>().unwrap(), id);
+        }
+    }
 
     #[test]
     fn distance_to_self() {
