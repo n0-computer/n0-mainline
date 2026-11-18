@@ -1015,3 +1015,6 @@ mod wire_tests;
 
 #[cfg(test)]
 mod concurrent_write_tests;
+
+#[cfg(test)]
+mod response_validation_tests;
