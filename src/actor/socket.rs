@@ -621,9 +621,10 @@ impl InflightRequests {
     /// Requests are ordered by `sent_at`, so the timed out ones are a prefix.
     fn cleanup(&mut self) {
         let timeout = self.request_timeout();
+        let now = Instant::now();
         let expired = self
             .requests
-            .partition_point(|request| request.sent_at.elapsed() >= timeout);
+            .partition_point(|request| now.duration_since(request.sent_at) >= timeout);
         self.requests.drain(..expired);
     }
 }
