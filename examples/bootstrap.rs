@@ -1,3 +1,5 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
+
 use n0_mainline::Dht;
 
 #[tokio::main]
@@ -17,7 +19,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{info:?}");
 
-    let client = Dht::builder().bootstrap(&[info.local_addr()]).build()?;
+    let local = SocketAddrV4::new(Ipv4Addr::LOCALHOST, info.local_addr().port());
+    let client = Dht::builder().bootstrap(&[local]).build()?;
 
     client.bootstrapped().await?;
 

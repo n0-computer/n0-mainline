@@ -234,6 +234,12 @@ impl KrpcSocket {
     /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn request(&mut self, address: SocketAddrV4, request: RequestSpecific) -> u32 {
         let transaction_id = self.inflight_requests.add(address);
+        if address.ip().is_unspecified() {
+            // 0.0.0.0 is not a valid destination (RFC 1122), and where the OS sends it differs
+            // between platforms. The request is left to time out.
+            warn!(?address, "Not sending a request to an unspecified address");
+            return transaction_id;
+        }
 
         let message = self.request_message(transaction_id, request);
         trace!(context = "socket_message_sending", message = ?message);
@@ -392,7 +398,7 @@ impl KrpcSocket {
             );
             return false;
         };
-        if !compare_socket_addr(&request.to, from) {
+        if request.to != *from {
             trace!(
                 context = "socket_validation",
                 message = "Response from wrong address"
@@ -437,19 +443,6 @@ impl KrpcSocket {
         trace!(context = "socket_message_sending", message = ?message);
         self.outbox.push_back((bytes, SocketAddr::from(address)));
     }
-}
-
-// Same as SocketAddr::eq but ignores the ip if it is unspecified for testing reasons.
-fn compare_socket_addr(a: &SocketAddrV4, b: &SocketAddrV4) -> bool {
-    if a.port() != b.port() {
-        return false;
-    }
-
-    if a.ip().is_unspecified() {
-        return true;
-    }
-
-    a.ip() == b.ip()
 }
 
 struct InflightRequest {
@@ -658,7 +651,7 @@ mod test {
     #[tokio::test]
     async fn recv_response() {
         let mut client = KrpcSocket::client().unwrap();
-        let client_address = client.local_addr();
+        let client_address = SocketAddrV4::new([127, 0, 0, 1].into(), client.local_addr().port());
 
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
@@ -698,7 +691,7 @@ mod test {
     #[tokio::test]
     async fn ignore_response_from_wrong_address() {
         let mut server = KrpcSocket::client().unwrap();
-        let server_address = server.local_addr();
+        let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
 
         let mut client = KrpcSocket::client().unwrap();
 
@@ -733,12 +726,13 @@ mod test {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
         let mut client = KrpcSocket::client().unwrap();
+        let client_address = SocketAddrV4::new([127, 0, 0, 1].into(), client.local_addr().port());
         let mut stranger = KrpcSocket::client().unwrap();
 
         server.inflight_requests.requests.insert(
             8,
             InflightRequest {
-                to: client.local_addr(),
+                to: client_address,
                 sent_at: Instant::now(),
             },
         );
@@ -830,6 +824,21 @@ mod test {
     }
 
     #[tokio::test]
+    async fn requests_to_unspecified_address_are_not_sent() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let tid = socket.request(
+            SocketAddrV4::new([0, 0, 0, 0].into(), 6881),
+            RequestSpecific {
+                requester_id: Id::random(),
+                request_type: RequestTypeSpecific::Ping,
+            },
+        );
+
+        assert!(socket.outbox.is_empty());
+        assert!(socket.inflight(&tid));
+    }
+
+    #[tokio::test]
     async fn late_response_does_not_inflate_request_timeout() {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
@@ -838,7 +847,7 @@ mod test {
         server.inflight_requests.requests.insert(
             8,
             InflightRequest {
-                to: client.local_addr(),
+                to: SocketAddrV4::new([127, 0, 0, 1].into(), client.local_addr().port()),
                 sent_at: Instant::now() - Duration::from_secs(10),
             },
         );
