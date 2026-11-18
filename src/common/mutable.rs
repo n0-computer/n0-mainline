@@ -1,6 +1,6 @@
 //! Helper functions and structs for mutable items.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha1_smol::Sha1;
 use std::convert::TryFrom;
 
@@ -88,7 +88,9 @@ impl MutableItem {
         let signature =
             Signature::from_slice(signature).map_err(|_| MutableError::InvalidMutableSignature)?;
 
-        key.verify(&encode_signable(seq, &v, salt.as_deref()), &signature)
+        // Strict: a small-order key has no secret key, so a plain check would accept a
+        // signature for any value under it.
+        key.verify_strict(&encode_signable(seq, &v, salt.as_deref()), &signature)
             .map_err(|_| MutableError::InvalidMutableSignature)?;
 
         let derived = MutableItem::target_from_key(&key.to_bytes(), salt.as_deref());
@@ -203,6 +205,34 @@ impl From<PutMutableRequestArguments> for MutableItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The identity point, a public key of small order. No secret key belongs to it, and
+    /// the signature `R = identity, s = 0` satisfies the plain verification equation for
+    /// any message.
+    const WEAK_KEY: [u8; 32] = {
+        let mut key = [0; 32];
+        key[0] = 1;
+        key
+    };
+
+    #[test]
+    fn rejects_small_order_key() {
+        let mut signature = [0; 64];
+        signature[..32].copy_from_slice(&WEAK_KEY);
+        let target = MutableItem::target_from_key(&WEAK_KEY, None);
+        let result = MutableItem::from_dht_message(
+            target,
+            &WEAK_KEY,
+            b"anything".to_vec().into(),
+            1,
+            &signature,
+            None,
+        );
+        assert!(matches!(
+            result,
+            Err(MutableError::InvalidMutablePublicKey | MutableError::InvalidMutableSignature)
+        ));
+    }
 
     #[test]
     fn signable_without_salt() {
