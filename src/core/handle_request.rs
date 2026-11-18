@@ -122,7 +122,7 @@ mod tests {
             from,
             Message {
                 transaction_id: 0,
-                version: Some(crate::core::VERSION),
+                version: None,
                 requester_ip: None,
                 read_only: false,
                 message_type: MessageType::Response(ResponseSpecific::Ping(

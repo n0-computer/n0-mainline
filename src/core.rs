@@ -36,12 +36,6 @@ const MAX_RECENTLY_PINGED: usize = 1000;
 /// Minimum time before we ping the same requester again.
 const REQUESTER_PING_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Client version sent in every message (`v` in BEP 5).
-///
-/// Not "RS": upstream `mainline` nodes take "RS" 06 or later as support for the
-/// signed peers extension, which this crate does not have.
-pub const VERSION: [u8; 4] = [b'N', b'0', 0, 7]; // "N0" version 0.7
-
 #[derive(Debug)]
 /// Side effect free Core, containing all the state and methods necessary
 /// for comprehensive and deterministic testing.
