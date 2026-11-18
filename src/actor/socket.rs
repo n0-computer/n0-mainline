@@ -4,7 +4,7 @@
 //! platform-specific configuration (ECN, buffer sizes, MTU discovery).
 //! Async readiness is driven by [`tokio::net::UdpSocket`] via `try_io`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::io::{self, ErrorKind, IoSliceMut};
 use std::net::{SocketAddr, SocketAddrV4};
@@ -481,7 +481,6 @@ fn compare_socket_addr(a: &SocketAddrV4, b: &SocketAddrV4) -> bool {
 }
 
 struct InflightRequest {
-    tid: u32,
     to: SocketAddrV4,
     sent_at: Instant,
 }
@@ -489,20 +488,19 @@ struct InflightRequest {
 impl Debug for InflightRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InflightRequest")
-            .field("tid", &self.tid)
             .field("to", &self.to)
             .field("elapsed", &self.sent_at.elapsed())
             .finish()
     }
 }
 
-/// Requests that are waiting for a response.
+/// Requests that are waiting for a response, by their transaction id.
 ///
-/// Requests are ordered by their transaction_id and thus by sent_at, so a sorted `Vec` is
-/// enough: lookup is a binary search, and timed out requests are a prefix.
+/// Transaction ids are random, so that an off-path attacker cannot predict them and forge
+/// responses from the nodes we query. There are only as many requests as we send within a
+/// timeout, so the timeout scan in [`Self::cleanup`] stays cheap.
 struct InflightRequests {
-    next_tid: u32,
-    requests: Vec<InflightRequest>,
+    requests: HashMap<u32, InflightRequest>,
     estimated_rtt: Duration,
     deviation_rtt: Duration,
 }
@@ -510,78 +508,67 @@ struct InflightRequests {
 impl InflightRequests {
     fn new() -> Self {
         Self {
-            next_tid: 0,
-            requests: Vec::new(),
+            requests: HashMap::new(),
             estimated_rtt: MIN_REQUEST_TIMEOUT,
             deviation_rtt: Duration::from_secs(0),
         }
-    }
-
-    /// Increments self.next_tid and returns the previous value.
-    fn tid(&mut self) -> u32 {
-        // We don't reuse freed transaction ids, to preserve the sortablitiy
-        // of both `tid`s and `sent_at`.
-        let tid = self.next_tid;
-        self.next_tid = self.next_tid.wrapping_add(1);
-        tid
     }
 
     fn request_timeout(&self) -> Duration {
         (self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)).min(MAX_REQUEST_TIMEOUT)
     }
 
+    /// Returns the request with this transaction id, if it has not timed out.
     fn get(&self, key: u32) -> Option<&InflightRequest> {
-        if let Ok(index) = self.find_by_tid(key)
-            && let Some(request) = self.requests.get(index)
-            && request.sent_at.elapsed() < self.request_timeout()
-        {
-            return Some(request);
-        };
-
-        None
+        self.requests
+            .get(&key)
+            .filter(|request| request.sent_at.elapsed() < self.request_timeout())
     }
 
     /// Returns the request with this transaction id, whether or not it has timed out.
     fn peek(&self, key: u32) -> Option<&InflightRequest> {
-        self.find_by_tid(key)
-            .ok()
-            .map(|index| &self.requests[index])
+        self.requests.get(&key)
     }
 
-    /// Adds a [InflightRequest] with new transaction_id, and returns that id.
+    /// Adds a [InflightRequest] under a new random transaction id, and returns that id.
+    ///
+    /// The id is unique among the requests a response may still match. An id is only reused
+    /// once its request is gone, and then any response to the old request is ignored.
     fn add(&mut self, to: SocketAddrV4) -> u32 {
-        let tid = self.tid();
-        self.requests.push(InflightRequest {
+        let tid = loop {
+            let tid = rand::random();
+            if !self.requests.contains_key(&tid) {
+                break tid;
+            }
+        };
+        self.requests.insert(
             tid,
-            to,
-            sent_at: Instant::now(),
-        });
+            InflightRequest {
+                to,
+                sent_at: Instant::now(),
+            },
+        );
 
         tid
     }
 
     fn remove(&mut self, key: u32) -> Option<InflightRequest> {
-        match self.find_by_tid(key) {
-            Ok(index) => {
-                let request = self.requests.remove(index);
+        let request = self.requests.remove(&key)?;
 
-                // A response that arrives long after the request timed out is still handled,
-                // but it does not count as a round trip sample: otherwise a single late
-                // response could inflate the timeout for every later request.
-                let rtt = request.sent_at.elapsed();
-                if rtt <= self.request_timeout() * 2 {
-                    self.update_rtt_estimates(rtt);
-                    trace!(
-                        "Updated estimated round trip time {:?} and request timeout {:?}",
-                        self.estimated_rtt,
-                        self.request_timeout()
-                    );
-                }
-
-                Some(request)
-            }
-            Err(_) => None,
+        // A response that arrives long after the request timed out is still handled,
+        // but it does not count as a round trip sample: otherwise a single late
+        // response could inflate the timeout for every later request.
+        let rtt = request.sent_at.elapsed();
+        if rtt <= self.request_timeout() * 2 {
+            self.update_rtt_estimates(rtt);
+            trace!(
+                "Updated estimated round trip time {:?} and request timeout {:?}",
+                self.estimated_rtt,
+                self.request_timeout()
+            );
         }
+
+        Some(request)
     }
 
     fn update_rtt_estimates(&mut self, sample_rtt: Duration) {
@@ -605,21 +592,11 @@ impl InflightRequests {
         self.deviation_rtt = Duration::from_secs_f64(new_dev_rtt);
     }
 
-    fn find_by_tid(&self, tid: u32) -> Result<usize, usize> {
-        self.requests
-            .binary_search_by(|request| request.tid.cmp(&tid))
-    }
-
     /// Removes requests that have timed out.
-    ///
-    /// Requests are ordered by `sent_at`, so the timed out ones are a prefix.
     fn cleanup(&mut self) {
         let timeout = self.request_timeout();
-        let now = Instant::now();
-        let expired = self
-            .requests
-            .partition_point(|request| now.duration_since(request.sent_at) >= timeout);
-        self.requests.drain(..expired);
+        self.requests
+            .retain(|_, request| request.sent_at.elapsed() < timeout);
     }
 }
 
@@ -629,11 +606,10 @@ impl Debug for InflightRequests {
         let non_expired: Vec<_> = self
             .requests
             .iter()
-            .filter(|req| req.sent_at.elapsed() < timeout)
+            .filter(|(_, req)| req.sent_at.elapsed() < timeout)
             .collect();
 
         f.debug_struct("InflightRequests")
-            .field("next_tid", &self.next_tid)
             .field("requests", &non_expired)
             .field("estimated_rtt", &self.estimated_rtt)
             .field("deviation_rtt", &self.deviation_rtt)
@@ -668,27 +644,11 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn tid() {
-        let socket = KrpcSocket::server().unwrap();
-
-        let mut requests = socket.inflight_requests;
-        assert_eq!(requests.tid(), 0);
-        assert_eq!(requests.tid(), 1);
-        assert_eq!(requests.tid(), 2);
-
-        requests.next_tid = u32::MAX;
-
-        assert_eq!(requests.tid(), u32::MAX);
-        assert_eq!(requests.tid(), 0);
-    }
-
-    #[tokio::test]
     async fn recv_request() {
         let mut server = KrpcSocket::server().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
 
         let mut client = KrpcSocket::client().unwrap();
-        client.inflight_requests.next_tid = 120;
 
         let client_address = client.local_addr();
         let request = RequestSpecific {
@@ -698,7 +658,7 @@ mod test {
 
         let expected_request = request.clone();
 
-        client.request(server_address, request);
+        let tid = client.request(server_address, request);
         client.flush().await;
 
         let (message, from) = loop {
@@ -708,7 +668,7 @@ mod test {
         };
 
         assert_eq!(from.port(), client_address.port());
-        assert_eq!(message.transaction_id, 120);
+        assert_eq!(message.transaction_id, tid);
         assert!(message.read_only, "Read-only should be true");
         assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
         assert_eq!(message.message_type, MessageType::Request(expected_request));
@@ -750,11 +710,13 @@ mod test {
         let responder_id = Id::random();
         let response = ResponseSpecific::Ping(PingResponseArguments { responder_id });
 
-        server.inflight_requests.requests.push(InflightRequest {
-            tid: 8,
-            to: client_address,
-            sent_at: Instant::now(),
-        });
+        server.inflight_requests.requests.insert(
+            8,
+            InflightRequest {
+                to: client_address,
+                sent_at: Instant::now(),
+            },
+        );
 
         client.response(server_address, 8, response);
         client.flush().await;
@@ -786,11 +748,13 @@ mod test {
 
         let client_address = client.local_addr();
 
-        server.inflight_requests.requests.push(InflightRequest {
-            tid: 8,
-            to: SocketAddrV4::new([127, 0, 0, 1].into(), client_address.port() + 1),
-            sent_at: Instant::now(),
-        });
+        server.inflight_requests.requests.insert(
+            8,
+            InflightRequest {
+                to: SocketAddrV4::new([127, 0, 0, 1].into(), client_address.port() + 1),
+                sent_at: Instant::now(),
+            },
+        );
 
         let response = ResponseSpecific::Ping(PingResponseArguments {
             responder_id: Id::random(),
@@ -815,11 +779,13 @@ mod test {
         let mut client = KrpcSocket::client().unwrap();
         let mut stranger = KrpcSocket::client().unwrap();
 
-        server.inflight_requests.requests.push(InflightRequest {
-            tid: 8,
-            to: client.local_addr(),
-            sent_at: Instant::now(),
-        });
+        server.inflight_requests.requests.insert(
+            8,
+            InflightRequest {
+                to: client.local_addr(),
+                sent_at: Instant::now(),
+            },
+        );
         let response = ResponseSpecific::Ping(PingResponseArguments {
             responder_id: Id::random(),
         });
@@ -848,11 +814,13 @@ mod test {
         let tid = 8;
         let sent_at = Instant::now();
 
-        server.inflight_requests.requests.push(InflightRequest {
+        server.inflight_requests.requests.insert(
             tid,
-            to: SocketAddrV4::new([0, 0, 0, 0].into(), 0),
-            sent_at,
-        });
+            InflightRequest {
+                to: SocketAddrV4::new([0, 0, 0, 0].into(), 0),
+                sent_at,
+            },
+        );
 
         tokio::time::sleep(server.inflight_requests.request_timeout()).await;
 
@@ -875,7 +843,7 @@ mod test {
                 socket.request(unresponsive, request.clone());
             }
             let expired = Instant::now() - 2 * socket.inflight_requests.request_timeout();
-            for request in &mut socket.inflight_requests.requests {
+            for request in socket.inflight_requests.requests.values_mut() {
                 request.sent_at = expired;
             }
             sender.send_to(b"ping", socket_address).unwrap();
@@ -911,11 +879,13 @@ mod test {
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
         let mut client = KrpcSocket::client().unwrap();
 
-        server.inflight_requests.requests.push(InflightRequest {
-            tid: 8,
-            to: client.local_addr(),
-            sent_at: Instant::now() - Duration::from_secs(10),
-        });
+        server.inflight_requests.requests.insert(
+            8,
+            InflightRequest {
+                to: client.local_addr(),
+                sent_at: Instant::now() - Duration::from_secs(10),
+            },
+        );
         let response = ResponseSpecific::Ping(PingResponseArguments {
             responder_id: Id::random(),
         });
