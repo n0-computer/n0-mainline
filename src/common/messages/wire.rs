@@ -124,14 +124,11 @@ fn encode_request(request: &RequestSpecific) -> (&'static [u8], Dict<'_>) {
                     b"announce_peer"
                 }
                 PutRequestSpecific::PutImmutable(args) => {
-                    // Older n0 servers require this redundant field.
-                    a.insert(b"target", id(&args.target));
+                    // BEP 44 puts carry no target: the receiver derives it.
                     a.insert(b"v", bytes(&args.v[..]));
                     b"put"
                 }
                 PutRequestSpecific::PutMutable(args) => {
-                    // Older n0 servers require this redundant field.
-                    a.insert(b"target", id(&args.target));
                     a.insert(b"v", bytes(&args.v[..]));
                     a.insert(b"k", bytes(&args.k[..]));
                     a.insert(b"seq", Value::Int(args.seq));
@@ -571,6 +568,9 @@ mod tests {
                 unreachable!();
             };
             assert_eq!(*put.put_request_type.target(), expected);
+            // We send puts the standard way, without a target.
+            let encoded = Message::from_bytes(wire).unwrap().to_bytes();
+            assert!(!encoded.windows(6).any(|w| w == b"target"));
             // An optional target supplied by an older sender must not override the derived key.
             let mut legacy = wire.to_vec();
             let end_of_args = legacy.windows(5).position(|w| w == b"e1:q3").unwrap();
