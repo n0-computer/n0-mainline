@@ -535,8 +535,6 @@ impl InflightRequests {
     /// The id is unique among the requests a response may still match. An id is only reused
     /// once its request is gone, and then any response to the old request is ignored.
     fn add(&mut self, to: SocketAddrV4) -> u32 {
-        // From a cryptographically secure generator: seeing earlier ids must not reveal
-        // the next one.
         let tid = loop {
             let tid = rand::random();
             if !self.requests.contains_key(&tid) {
