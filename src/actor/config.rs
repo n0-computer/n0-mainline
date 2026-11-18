@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, time::Duration};
 
 pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
     "router.bittorrent.com:6881",
@@ -26,6 +26,8 @@ pub struct Config {
     ///
     /// Defaults to client mode, without automatic promotion to server mode.
     pub mode: crate::Mode,
+    /// Fixed timeout for individual outgoing DHT requests.
+    pub request_timeout: Duration,
     /// A known public IPv4 address for this node to generate
     /// a secure node Id from according to [BEP_0042](https://www.bittorrent.org/beps/bep_0042.html)
     ///
@@ -49,6 +51,7 @@ impl Default for Config {
             port: None,
             server_settings: Default::default(),
             mode: crate::Mode::Client,
+            request_timeout: Duration::from_secs(5),
             public_ip: None,
             #[cfg(test)]
             disable_announce_signed_peers: false,
