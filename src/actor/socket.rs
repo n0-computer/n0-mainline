@@ -23,6 +23,11 @@ const MTU: usize = 2048;
 
 const DEFAULT_PORT: u16 = 6881;
 
+const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+/// Upper bound for the adaptive request timeout, so that slow or malicious responders can
+/// delay lookups only by a bounded amount.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
 const LEGACY_VERSION: [u8; 4] = [82, 83, 0, 5]; // "RS" version 05
@@ -198,7 +203,7 @@ impl KrpcSocket {
         Ok(Self {
             io,
             mode: config.mode,
-            inflight_requests: InflightRequests::new(config.request_timeout),
+            inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
             datagram_hook: None,
@@ -517,15 +522,17 @@ impl Debug for InflightRequest {
 struct InflightRequests {
     next_tid: u32,
     requests: Vec<InflightRequest>,
-    request_timeout: Duration,
+    estimated_rtt: Duration,
+    deviation_rtt: Duration,
 }
 
 impl InflightRequests {
-    fn new(request_timeout: Duration) -> Self {
+    fn new() -> Self {
         Self {
             next_tid: 0,
             requests: Vec::new(),
-            request_timeout,
+            estimated_rtt: MIN_REQUEST_TIMEOUT,
+            deviation_rtt: Duration::from_secs(0),
         }
     }
 
@@ -539,7 +546,7 @@ impl InflightRequests {
     }
 
     fn request_timeout(&self) -> Duration {
-        self.request_timeout
+        (self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)).min(MAX_REQUEST_TIMEOUT)
     }
 
     fn get(&self, key: u32) -> Option<&InflightRequest> {
@@ -573,9 +580,48 @@ impl InflightRequests {
     }
 
     fn remove(&mut self, key: u32) -> Option<InflightRequest> {
-        self.find_by_tid(key)
-            .ok()
-            .map(|index| self.requests.remove(index))
+        match self.find_by_tid(key) {
+            Ok(index) => {
+                let request = self.requests.remove(index);
+
+                // A response that arrives long after the request timed out is still handled,
+                // but it does not count as a round trip sample: otherwise a single late
+                // response could inflate the timeout for every later request.
+                let rtt = request.sent_at.elapsed();
+                if rtt <= self.request_timeout() * 2 {
+                    self.update_rtt_estimates(rtt);
+                    trace!(
+                        "Updated estimated round trip time {:?} and request timeout {:?}",
+                        self.estimated_rtt,
+                        self.request_timeout()
+                    );
+                }
+
+                Some(request)
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn update_rtt_estimates(&mut self, sample_rtt: Duration) {
+        // Clamp instead of ignoring fast responses, so that the estimate comes back down
+        // after a spike.
+        let sample_rtt = sample_rtt.clamp(MIN_REQUEST_TIMEOUT, MAX_REQUEST_TIMEOUT);
+
+        // Use TCP-like alpha = 1/8, beta = 1/4
+        let alpha = 0.125;
+        let beta = 0.25;
+
+        let sample_rtt_secs = sample_rtt.as_secs_f64();
+        let est_rtt_secs = self.estimated_rtt.as_secs_f64();
+        let dev_rtt_secs = self.deviation_rtt.as_secs_f64();
+
+        let new_est_rtt = (1.0 - alpha) * est_rtt_secs + alpha * sample_rtt_secs;
+        let new_dev_rtt =
+            (1.0 - beta) * dev_rtt_secs + beta * (sample_rtt_secs - new_est_rtt).abs();
+
+        self.estimated_rtt = Duration::from_secs_f64(new_est_rtt);
+        self.deviation_rtt = Duration::from_secs_f64(new_dev_rtt);
     }
 
     fn find_by_tid(&self, tid: u32) -> Result<usize, usize> {
@@ -608,6 +654,8 @@ impl Debug for InflightRequests {
         f.debug_struct("InflightRequests")
             .field("next_tid", &self.next_tid)
             .field("requests", &non_expired)
+            .field("estimated_rtt", &self.estimated_rtt)
+            .field("deviation_rtt", &self.deviation_rtt)
             .field("request_timeout", &timeout)
             .finish()
     }
@@ -814,11 +862,7 @@ mod test {
 
     #[tokio::test]
     async fn inflight_request_timeout() {
-        let mut server = KrpcSocket::new(&Config {
-            request_timeout: Duration::from_millis(20),
-            ..Default::default()
-        })
-        .unwrap();
+        let mut server = KrpcSocket::client().unwrap();
 
         let tid = 8;
         let sent_at = Instant::now();
@@ -863,36 +907,21 @@ mod test {
     }
 
     #[test]
-    fn request_timeout_is_fixed_for_fast_and_slow_responses() {
-        let timeout = Duration::from_secs(5);
-        let mut requests = InflightRequests::new(timeout);
-        let address = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
-        for age in [
-            Duration::ZERO,
-            Duration::from_secs(2),
-            Duration::from_secs(30),
-        ] {
-            let tid = requests.add(address);
-            requests.requests.last_mut().unwrap().sent_at = Instant::now() - age;
-            assert!(requests.remove(tid).is_some());
-            assert_eq!(requests.request_timeout(), timeout);
+    fn request_timeout_is_bounded_and_recovers() {
+        let mut requests = InflightRequests::new();
+        assert_eq!(requests.request_timeout(), MIN_REQUEST_TIMEOUT);
+        // Responses that each arrive just within the accepted range ratchet the timeout up,
+        // but never beyond the maximum.
+        for _ in 0..100 {
+            let sample = requests.request_timeout().mul_f64(1.9);
+            requests.update_rtt_estimates(sample);
         }
-    }
-
-    #[test]
-    fn configured_timeout_controls_expiration_and_cleanup() {
-        let timeout = Duration::from_secs(20);
-        let mut requests = InflightRequests::new(timeout);
-        let address = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
-        let expired = requests.add(address);
-        requests.requests.last_mut().unwrap().sent_at = Instant::now() - timeout * 2;
-        let pending = requests.add(address);
-        requests.requests.last_mut().unwrap().sent_at = Instant::now() - timeout / 2;
-        assert!(requests.get(expired).is_none());
-        assert!(requests.get(pending).is_some());
-        requests.cleanup();
-        assert_eq!(requests.requests.len(), 1);
-        assert_eq!(requests.requests[0].tid, pending);
+        assert_eq!(requests.request_timeout(), MAX_REQUEST_TIMEOUT);
+        // Fast responses bring it back down to the minimum.
+        for _ in 0..200 {
+            requests.update_rtt_estimates(Duration::from_millis(50));
+        }
+        assert!(requests.request_timeout() < MIN_REQUEST_TIMEOUT.mul_f64(1.1));
     }
 
     #[tokio::test]
@@ -916,10 +945,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(
-            server.inflight_requests.request_timeout(),
-            Config::default().request_timeout
-        );
+        assert!(server.inflight_requests.request_timeout() < Duration::from_secs(3));
     }
 
     /// Datagrams that arrive in one GRO batch are handed out one by one.
