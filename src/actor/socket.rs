@@ -626,7 +626,7 @@ mod test {
         assert_eq!(from.port(), client_address.port());
         assert_eq!(message.transaction_id, tid);
         assert!(message.read_only, "Read-only should be true");
-        assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
+        assert_eq!(message.version, Some(VERSION));
         assert_eq!(message.message_type, MessageType::Request(expected_request));
     }
 
@@ -686,7 +686,7 @@ mod test {
         assert_eq!(from.port(), client_address.port());
         assert_eq!(message.transaction_id, 8);
         assert!(message.read_only, "Read-only should be true");
-        assert_eq!(message.version, Some(VERSION), "Version should be 'RS'");
+        assert_eq!(message.version, Some(VERSION));
         assert_eq!(
             message.message_type,
             MessageType::Response(ResponseSpecific::Ping(PingResponseArguments {
