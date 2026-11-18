@@ -14,6 +14,7 @@ use tokio::net::UdpSocket;
 use tracing::{debug, trace, warn};
 
 use crate::common::{ErrorSpecific, Message, MessageType, RequestSpecific, ResponseSpecific};
+use crate::core::VERSION;
 
 use super::config::Config;
 
@@ -407,8 +408,7 @@ impl KrpcSocket {
         Message {
             transaction_id,
             message_type: MessageType::Request(message),
-            // The optional client version (`v` in BEP 5) is not sent.
-            version: None,
+            version: Some(VERSION),
             read_only: self.mode == crate::Mode::Client,
             requester_ip: None,
         }
@@ -424,8 +424,7 @@ impl KrpcSocket {
         Message {
             transaction_id: request_tid,
             message_type: message,
-            // The optional client version (`v` in BEP 5) is not sent.
-            version: None,
+            version: Some(VERSION),
             read_only: self.mode == crate::Mode::Client,
             // BEP_0042 Only relevant in responses.
             requester_ip: Some(requester_ip),
@@ -593,7 +592,10 @@ impl Debug for InflightRequests {
 
 #[cfg(test)]
 mod test {
-    use crate::common::{Id, PingResponseArguments, RequestTypeSpecific};
+    use crate::{
+        common::{Id, PingResponseArguments, RequestTypeSpecific},
+        core::VERSION,
+    };
 
     use super::*;
 
@@ -624,7 +626,7 @@ mod test {
         assert_eq!(from.port(), client_address.port());
         assert_eq!(message.transaction_id, tid);
         assert!(message.read_only, "Read-only should be true");
-        assert_eq!(message.version, None);
+        assert_eq!(message.version, Some(VERSION));
         assert_eq!(message.message_type, MessageType::Request(expected_request));
     }
 
@@ -684,7 +686,7 @@ mod test {
         assert_eq!(from.port(), client_address.port());
         assert_eq!(message.transaction_id, 8);
         assert!(message.read_only, "Read-only should be true");
-        assert_eq!(message.version, None);
+        assert_eq!(message.version, Some(VERSION));
         assert_eq!(
             message.message_type,
             MessageType::Response(ResponseSpecific::Ping(PingResponseArguments {

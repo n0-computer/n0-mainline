@@ -8,8 +8,8 @@ All notable changes to mainline dht will be documented in this file.
 
 - Replaced `DhtBuilder::server_mode()` and `Info::server_mode()` with `mode` APIs
   using the non-exhaustive `Mode` enum, which defaults to `Mode::Client`.
-- Messages no longer carry the optional client version (`v`, previously "RS" 06),
-  so that upstream nodes no longer expect signed peers support.
+- The KRPC client version is now "N0" plus the crate's major and minor version,
+  instead of "RS" 06, so that upstream nodes no longer expect signed peers support.
 
 ### Removed
 

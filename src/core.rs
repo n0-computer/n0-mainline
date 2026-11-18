@@ -36,6 +36,29 @@ const MAX_RECENTLY_PINGED: usize = 1000;
 /// Minimum time before we ping the same requester again.
 const REQUESTER_PING_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Client version sent in every message (`v` in BEP 5): "N0" and the crate's major and minor version.
+///
+/// Not "RS": upstream `mainline` nodes take "RS" 06 or later as support for the
+/// signed peers extension, which this crate does not have.
+pub const VERSION: [u8; 4] = [
+    b'N',
+    b'0',
+    parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
+    parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
+];
+
+/// Parses a decimal version component at compile time.
+const fn parse_u8(s: &str) -> u8 {
+    let bytes = s.as_bytes();
+    let mut value = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        value = value * 10 + (bytes[i] - b'0');
+        i += 1;
+    }
+    value
+}
+
 #[derive(Debug)]
 /// Side effect free Core, containing all the state and methods necessary
 /// for comprehensive and deterministic testing.
@@ -435,4 +458,17 @@ pub enum Response {
     Peers(Vec<SocketAddrV4>),
     Immutable(Box<[u8]>),
     Mutable(MutableItem),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_is_n0_and_crate_major_minor() {
+        let mut parts = env!("CARGO_PKG_VERSION").split('.');
+        let major: u8 = parts.next().unwrap().parse().unwrap();
+        let minor: u8 = parts.next().unwrap().parse().unwrap();
+        assert_eq!(VERSION, [b'N', b'0', major, minor]);
+    }
 }
