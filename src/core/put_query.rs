@@ -52,6 +52,10 @@ impl PutQuery {
         debug!(?target, closest_secure_nodes = ?closest_nodes.len(), "PutQuery start");
 
         for node in closest_nodes.iter().chain(self.extra_nodes.iter()) {
+            // Servers reject tokens older than about two rotations, so only use fresh ones.
+            if !node.valid_token() {
+                continue;
+            }
             // Set correct values to the request placeholders
             if let Some(token) = node.token() {
                 let tid = socket.request(
@@ -329,5 +333,32 @@ mod tests {
         let mut put = PutQuery::new(request, Some(vec![extra].into()));
         put.start(&mut socket, &[]).unwrap();
         assert!(put.started());
+    }
+
+    #[tokio::test]
+    async fn stale_tokens_are_not_used() {
+        use crate::common::{NodeInner, PutImmutableRequestArguments, TOKEN_ROTATE_INTERVAL};
+        let mut socket = KrpcSocket::new(&Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let stale = Node(std::sync::Arc::new(NodeInner {
+            id: Id::random(),
+            address: "127.0.0.1:12345".parse().unwrap(),
+            token: Some(Box::new([1])),
+            last_seen: std::time::Instant::now() - TOKEN_ROTATE_INTERVAL * 2,
+        }));
+        let request = PutRequestSpecific::PutImmutable(PutImmutableRequestArguments {
+            target: Id::random(),
+            v: Box::new([1]),
+        });
+        let mut put = PutQuery::new(request, None);
+        assert!(matches!(
+            put.start(&mut socket, &[stale]),
+            Err(PutError::Query(PutQueryError::NoClosestNodes))
+        ));
+        assert!(!put.started());
     }
 }
