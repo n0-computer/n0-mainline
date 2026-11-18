@@ -125,10 +125,16 @@ impl Core {
                     };
                     match MutableItem::from_dht_message(query.target(), &k, v, seq, &sig, salt) {
                         Ok(item) => {
-                            let response = Response::Mutable(item);
-                            query.response(from, response.clone());
+                            let min_seq = match &query.request.request_type {
+                                RequestTypeSpecific::GetValue(args) => args.seq,
+                                _ => None,
+                            };
+                            if min_seq.is_none_or(|seq| item.seq() > seq) {
+                                let response = Response::Mutable(item);
+                                query.response(from, response.clone());
 
-                            result = Some((*query_id, response));
+                                result = Some((*query_id, response));
+                            }
                         }
                         Err(error) => {
                             debug!(
