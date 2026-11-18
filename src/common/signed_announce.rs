@@ -1,6 +1,6 @@
 //! Helper functions and structs for announcing signed peers.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use std::{convert::TryFrom, time::SystemTime};
 
 use crate::Id;
@@ -68,7 +68,9 @@ impl SignedAnnounce {
         let signature =
             Signature::from_slice(signature).map_err(|_| SignedAnnounceError::Signature)?;
 
-        key.verify(&encode_signable(info_hash, timestamp), &signature)
+        // Strict: a small-order key has no secret key, so a plain check would accept a
+        // signature for any info hash and timestamp under it.
+        key.verify_strict(&encode_signable(info_hash, timestamp), &signature)
             .map_err(|_| SignedAnnounceError::Signature)?;
 
         let now = system_time();
@@ -139,6 +141,24 @@ mod tests {
     use rand::Rng;
 
     use super::*;
+
+    #[test]
+    fn rejects_small_order_key() {
+        // The identity point, a public key of small order. No secret key belongs to it,
+        // and the signature `R = identity, s = 0` satisfies the plain verification
+        // equation for any message.
+        let mut key = [0; 32];
+        key[0] = 1;
+        let mut signature = [0; 64];
+        signature[..32].copy_from_slice(&key);
+        let info_hash = Id::random();
+        assert!(
+            SignedAnnounce::from_dht_request(&info_hash, &key, system_time(), &signature).is_err()
+        );
+        assert!(
+            SignedAnnounce::from_dht_response(&info_hash, &key, system_time(), &signature).is_err()
+        );
+    }
 
     #[test]
     fn more_than_time_tolerance() {
