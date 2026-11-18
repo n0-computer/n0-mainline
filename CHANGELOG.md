@@ -2,7 +2,17 @@
 
 All notable changes to mainline dht will be documented in this file.
 
-## Unpublished 
+## Unpublished
+
+### Changed
+
+- Replaced `DhtBuilder::server_mode()` and `Info::server_mode()` with `mode` APIs
+  using the non-exhaustive `Mode` enum, which defaults to `Mode::Client`.
+
+### Removed
+
+- Removed self-ping reachability detection, `Info::firewalled()`, and automatic
+  promotion to server mode. Use `DhtBuilder::mode(Mode::Server)` to explicitly serve.
 
 ## Added
 

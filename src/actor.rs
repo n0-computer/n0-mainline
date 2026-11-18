@@ -61,7 +61,7 @@ impl Actor {
 
         Ok(Actor {
             socket,
-            core: Core::new(id, bootstrap, config.server_mode, config.server_settings),
+            core: Core::new(id, bootstrap, config.mode, config.server_settings),
 
             put_senders: HashMap::new(),
             get_senders: HashMap::new(),
@@ -117,13 +117,8 @@ impl Actor {
 
         self.start_put_queries(&done_iterative_queries, &mut done_put_queries);
 
-        let should_ping_alleged_new_address = self
-            .core
+        self.core
             .cleanup_done_queries(&done_iterative_queries, &done_put_queries);
-
-        if let Some(address) = should_ping_alleged_new_address {
-            self.ping(address);
-        }
 
         // Cleanup done iterative queries
         for (id, closest_nodes) in done_iterative_queries {
@@ -255,13 +250,6 @@ impl Actor {
         // Every 15 minutes refresh the routing table.
         if self.core.should_refresh_table() {
             self.core.update_last_table_refresh();
-            if !self.core.server_mode && !self.core.firewalled {
-                info!(
-                    "Adaptive mode: have been running long enough (not firewalled), switching to server mode"
-                );
-
-                self.set_server_mode(true);
-            }
             self.populate();
         }
 
@@ -306,11 +294,6 @@ impl Actor {
         self.core.bootstrap = bootstrap.into();
     }
 
-    fn set_server_mode(&mut self, mode: bool) {
-        self.socket.server_mode = mode;
-        self.core.server_mode = mode;
-    }
-
     fn handle_incoming_message(
         &mut self,
         message: Message,
@@ -318,7 +301,7 @@ impl Actor {
     ) -> Option<(Id, Response)> {
         match message.message_type {
             MessageType::Request(request_specific) => {
-                let (response, should_repopulate_routing_tables) = self.core.handle_request(
+                let response = self.core.handle_request(
                     from,
                     message.read_only,
                     message.version,
@@ -333,10 +316,6 @@ impl Actor {
                         self.socket.response(from, message.transaction_id, response)
                     }
                     _ => {}
-                }
-
-                if should_repopulate_routing_tables {
-                    self.populate();
                 }
 
                 None
@@ -606,8 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-2VYKUTI8"]
-    async fn foreign_ping_cannot_confirm_public_address() {
+    async fn ping_to_reported_address_does_not_change_mode_or_id() {
         let config = config::Config {
             bootstrap: vec![],
             ..Default::default()
@@ -626,8 +604,14 @@ mod tests {
             read_only: false,
             requester_ip: None,
         };
+        let original_id = *actor.id();
         actor.handle_incoming_message(ping, public_address);
+        actor.core.last_table_refresh =
+            std::time::Instant::now() - crate::core::REFRESH_TABLE_INTERVAL;
+        actor.periodic_node_maintaenance();
 
-        assert!(actor.core.firewalled);
+        assert_eq!(actor.info().mode(), crate::Mode::Client);
+        assert_eq!(actor.socket.mode, crate::Mode::Client);
+        assert_eq!(*actor.id(), original_id);
     }
 }

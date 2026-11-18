@@ -521,7 +521,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Configure and start the DHT node in server mode
-    let dht = Dht::builder().server_mode().build()?;
+    let dht = Dht::builder().mode(n0_mainline::Mode::Server).build()?;
 
     DhtLogger::info("DHT server node is running! Press Ctrl+C to stop.");
     // Wait for bootstrap to complete
@@ -560,17 +560,8 @@ async fn main() -> anyhow::Result<()> {
         }
 
         DhtLogger::info(&format!(
-            "    Firewalled : {}",
-            if info.firewalled() {
-                "Yes".red().bold()
-            } else {
-                "No".green().bold()
-            }
-        ));
-
-        DhtLogger::info(&format!(
             "    Server Mode: {}",
-            if info.server_mode() {
+            if info.mode() == n0_mainline::Mode::Server {
                 "Active".green().bold()
             } else {
                 "Inactive".yellow().bold()

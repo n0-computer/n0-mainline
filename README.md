@@ -17,7 +17,7 @@ Check the [Examples](https://github.com/n0-computer/n0-mainline/tree/main/exampl
 Running as a client, means you can store and query for values on the DHT, but not accept any incoming requests.
 
 ```rust,ignore
-use n0_mainline::Dht;
+use n0_mainline::{Dht, Mode};
 
 let dht = Dht::client().await.unwrap();
 ```
@@ -35,9 +35,9 @@ This implementation also includes [measures against Vertical Sybil Attacks](http
 Running as a server is the same as a client, but you also respond to incoming requests and serve as a routing and storing node, supporting the general routing of the DHT, and contributing to the storage capacity of the DHT.
 
 ```rust,ignore
-use n0_mainline::Dht;
+use n0_mainline::{Dht, Mode};
 
-let dht = Dht::server().await.unwrap(); // or `Dht::builder().server_mode().build().await;`
+let dht = Dht::builder().mode(Mode::Server).build()?; // or Dht::server()?
 ```
 
 Supported BEPs:
@@ -51,14 +51,15 @@ Supported BEPs:
 The server implementation has no rate-limiting, you can run your own [request filter](./examples/request_filter.rs) and apply your custom rate-limiting. 
 However, that limit/block will only apply _after_ parsing incoming messages, and it won't affect handling incoming responses.
 
-### Adaptive mode
+### Client and server modes
 
-The default Adaptive mode will start the node in client mode, and after 15 minutes of running with a publicly accessible address,
-it will switch to server mode. This way nodes that can serve as routing nodes (accessible and less likely to churn), serve as such.
+Nodes start in client mode and do not automatically switch to server mode.
+If you know your node is publicly reachable and will be long running, enable server mode
+with `Dht::builder().mode(Mode::Server).build()`.
+You can also provide a known public IPv4 address with `.public_ip(ip)` to derive the node ID
+from that address.
 
-If you want to explicitly start in Server mode, because you know you are not running behind firewall,
-you can call `Dht::builder().server_mode().build().await`, and you can optionally add your known public ip so the node doesn't have to depend on,
-votes from responding nodes: `Dht::builder().server_mode().public_ip().build().await`.
+Reported public addresses are observations from other nodes, not proof of inbound reachability.
 
 ## Acknowledgment
 

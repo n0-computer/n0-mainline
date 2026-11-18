@@ -49,14 +49,27 @@ impl From<ActorShutdown> for io::Error {
 /// Mainline Dht node.
 pub struct Dht(pub(crate) mpsc::Sender<ActorMessage>);
 
+/// Whether a node only makes requests or also serves other DHT nodes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Mode {
+    /// Make requests without serving incoming requests. This is the default.
+    #[default]
+    Client,
+    /// Also answer incoming requests and participate in routing and storage.
+    Server,
+}
+
 #[derive(Debug, Default, Clone)]
 /// A builder for the [Dht] node.
 pub struct DhtBuilder(Config);
 
 impl DhtBuilder {
-    /// Set this node's server_mode.
-    pub fn server_mode(&mut self) -> &mut Self {
-        self.0.server_mode = true;
+    /// Select the node's mode. Defaults to [`Mode::Client`].
+    ///
+    /// The mode stays fixed for the lifetime of the node.
+    pub fn mode(&mut self, mode: Mode) -> &mut Self {
+        self.0.mode = mode;
 
         self
     }
@@ -153,17 +166,16 @@ impl Dht {
         Dht::builder().build()
     }
 
-    /// Create a new DHT node that is running in [Server mode][DhtBuilder::server_mode] as
+    /// Create a new DHT node that is running in [server mode][Mode::Server] as
     /// soon as possible.
     ///
     /// You shouldn't use this option unless you are sure your
     /// DHT node is publicly accessible (not firewalled) _AND_ will be long running,
     /// and/or you are running your own local network for testing.
     ///
-    /// If you are not sure, use [Self::client] and it will switch
-    /// to server mode when/if these two conditions are met.
+    /// If you are not sure, use [Self::client], which remains in client mode.
     pub fn server() -> io::Result<Self> {
-        Dht::builder().server_mode().build()
+        Dht::builder().mode(crate::Mode::Server).build()
     }
 
     // === Getters ===
@@ -627,7 +639,9 @@ impl From<ActorShutdown> for PutError {
 
 /// Returns whether `item` should replace `current` as the most recent item.
 fn is_more_recent(item: &MutableItem, current: &MutableItem) -> bool {
-    item.seq() == current.seq() && item.value() > current.value()
+    // A higher seq wins. For equal seq the greater value wins, so that all readers settle on
+    // the same item.
+    (item.seq(), item.value()) > (current.seq(), current.value())
 }
 
 #[cfg(test)]
@@ -646,6 +660,18 @@ mod test {
     use crate::core::ConcurrencyError;
 
     use super::*;
+
+    #[tokio::test]
+    async fn builder_mode_is_reported_in_info() {
+        let mut builder = Dht::builder();
+        builder.no_bootstrap().port(0);
+        let default = builder.build().unwrap();
+        assert_eq!(default.info().await.unwrap().mode(), Mode::Client);
+        for mode in [Mode::Server, Mode::Client] {
+            let dht = builder.mode(mode).build().unwrap();
+            assert_eq!(dht.info().await.unwrap().mode(), mode);
+        }
+    }
 
     #[tokio::test]
     async fn non_krpc_datagrams_share_the_dht_socket() {
@@ -715,7 +741,7 @@ mod test {
         let a = Dht::client().unwrap();
         let result = Dht::builder()
             .port(a.info().await.unwrap().local_addr().port())
-            .server_mode()
+            .mode(crate::Mode::Server)
             .build();
 
         assert!(result.is_err());
@@ -1168,7 +1194,6 @@ mod test {
     }
 
     #[test]
-    #[ignore = "ANT-2026-6TOY5DPL"]
     fn higher_seq_is_more_recent() {
         let signer = SigningKey::from_bytes(&[7; 32]);
         let item = |seq, value: &[u8]| MutableItem::new(&signer, value, seq, None);

@@ -148,7 +148,7 @@ fn datagrams(batch: &[u8], len: usize, stride: usize) -> impl Iterator<Item = &[
 #[derive(Debug)]
 pub struct KrpcSocket {
     io: UdpIo,
-    pub(crate) server_mode: bool,
+    pub(crate) mode: crate::Mode,
     local_addr: SocketAddrV4,
 
     inflight_requests: InflightRequests,
@@ -202,7 +202,7 @@ impl KrpcSocket {
 
         Ok(Self {
             io,
-            server_mode: config.server_mode,
+            mode: config.mode,
             inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
@@ -220,7 +220,7 @@ impl KrpcSocket {
     #[cfg(test)]
     pub(crate) fn server() -> io::Result<Self> {
         Self::new(&Config {
-            server_mode: true,
+            mode: crate::Mode::Server,
             ..Default::default()
         })
     }
@@ -410,27 +410,24 @@ impl KrpcSocket {
     // === Private Methods ===
 
     fn is_expected_response(&mut self, message: &Message, from: &SocketAddrV4) -> bool {
-        // Positive or an error response or to an inflight request.
-        match self.inflight_requests.remove(message.transaction_id) {
-            Some(request) => {
-                if compare_socket_addr(&request.to, from) {
-                    return true;
-                } else {
-                    trace!(
-                        context = "socket_validation",
-                        message = "Response from wrong address"
-                    );
-                }
-            }
-            None => {
-                trace!(
-                    context = "socket_validation",
-                    message = "Unexpected response id, or timedout request"
-                );
-            }
+        // Positive or an error response to an inflight request. Check the sender before
+        // removing the request, so that nobody else can end it.
+        let Some(request) = self.inflight_requests.peek(message.transaction_id) else {
+            trace!(
+                context = "socket_validation",
+                message = "Unexpected response id, or timedout request"
+            );
+            return false;
+        };
+        if !compare_socket_addr(&request.to, from) {
+            trace!(
+                context = "socket_validation",
+                message = "Response from wrong address"
+            );
+            return false;
         }
-
-        false
+        self.inflight_requests.remove(message.transaction_id);
+        true
     }
 
     /// Set transactin_id, version and read_only
@@ -439,7 +436,7 @@ impl KrpcSocket {
             transaction_id,
             message_type: MessageType::Request(message),
             version: Some(self.version()),
-            read_only: !self.server_mode,
+            read_only: self.mode == crate::Mode::Client,
             requester_ip: None,
         }
     }
@@ -455,7 +452,7 @@ impl KrpcSocket {
             transaction_id: request_tid,
             message_type: message,
             version: Some(self.version()),
-            read_only: !self.server_mode,
+            read_only: self.mode == crate::Mode::Client,
             // BEP_0042 Only relevant in responses.
             requester_ip: Some(requester_ip),
         }
@@ -518,8 +515,10 @@ impl Debug for InflightRequest {
     }
 }
 
-/// We don't need a map, since we know the maximum size is `65536` requests.
-/// Requests are also ordered by their transaction_id and thus sent_at, so lookup is fast.
+/// Requests that are waiting for a response.
+///
+/// Requests are ordered by their transaction_id and thus by sent_at, so a sorted `Vec` is
+/// enough: lookup is a binary search, and timed out requests are a prefix.
 struct InflightRequests {
     next_tid: u32,
     requests: Vec<InflightRequest>,
@@ -559,6 +558,13 @@ impl InflightRequests {
         };
 
         None
+    }
+
+    /// Returns the request with this transaction id, whether or not it has timed out.
+    fn peek(&self, key: u32) -> Option<&InflightRequest> {
+        self.find_by_tid(key)
+            .ok()
+            .map(|index| &self.requests[index])
     }
 
     /// Adds a [InflightRequest] with new transaction_id, and returns that id.
@@ -623,21 +629,16 @@ impl InflightRequests {
             .binary_search_by(|request| request.tid.cmp(&tid))
     }
 
-    /// Removes timeedout requests if necessary to save memory
+    /// Removes requests that have timed out.
+    ///
+    /// Requests are ordered by `sent_at`, so the timed out ones are a prefix.
     fn cleanup(&mut self) {
-        if self.requests.len() < self.requests.capacity() {
-            return;
-        }
-
-        let index = match self
+        let timeout = self.request_timeout();
+        let now = Instant::now();
+        let expired = self
             .requests
-            .binary_search_by(|request| self.request_timeout().cmp(&request.sent_at.elapsed()))
-        {
-            Ok(index) => index,
-            Err(index) => index,
-        };
-
-        self.requests.drain(0..index);
+            .partition_point(|request| now.duration_since(request.sent_at) >= timeout);
+        self.requests.drain(..expired);
     }
 }
 
@@ -827,7 +828,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-QYMAMPLO"]
     async fn response_from_wrong_address_keeps_request_inflight() {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
@@ -879,7 +879,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-KILP8YTR"]
     async fn timed_out_requests_do_not_accumulate() {
         let mut socket = KrpcSocket::client().unwrap();
         let socket_address = SocketAddrV4::new([127, 0, 0, 1].into(), socket.local_addr().port());
