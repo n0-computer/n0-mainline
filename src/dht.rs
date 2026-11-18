@@ -74,6 +74,15 @@ impl DhtBuilder {
         self
     }
 
+    /// Set the fixed timeout for each outgoing DHT request. Defaults to 5 seconds.
+    ///
+    /// This is not an overall lookup deadline: a lookup can make several rounds
+    /// of requests. Response times do not change this timeout.
+    pub fn request_timeout(&mut self, timeout: std::time::Duration) -> &mut Self {
+        self.0.request_timeout = timeout;
+        self
+    }
+
     /// Set a custom settings for the node to use at server mode.
     ///
     /// Defaults to [ServerSettings::default]
