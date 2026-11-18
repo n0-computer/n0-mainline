@@ -26,6 +26,13 @@ impl Core {
             return None;
         };
 
+        // The socket only hands us responses to our own requests, from the
+        // address we sent them to, so the responder exists at that address.
+        let mut should_add_node = true;
+        let mut result = None;
+        let author_id = message.get_author_id();
+        let from_version = message.version.to_owned();
+
         // If the response looks like a Ping response, check StoreQueries for the transaction_id.
         if let Some(query) = self
             .put_queries
@@ -40,22 +47,11 @@ impl Core {
                 MessageType::Error(error) => query.error(error),
                 _ => {}
             };
-
-            return None;
-        }
-
-        let mut should_add_node = false;
-        let author_id = message.get_author_id();
-        let from_version = message.version.to_owned();
-
-        // Get corresponding query for message.transaction_id
-        if let Some(query) = self
+        } else if let Some(query) = self
             .iterative_queries
             .values_mut()
             .find(|query| query.inflight(message.transaction_id))
         {
-            // KrpcSocket would not give us a response from the wrong address for the transaction_id
-            should_add_node = true;
             query.responded(from);
 
             if let Some(nodes) = message.get_closer_nodes() {
@@ -88,7 +84,7 @@ impl Core {
                     let response = Response::Peers(values);
                     query.response(from, response.clone());
 
-                    return Some((target, response));
+                    result = Some((target, response));
                 }
                 MessageType::Response(ResponseSpecific::GetSignedPeers(
                     GetSignedPeersResponseArguments {
@@ -122,7 +118,7 @@ impl Core {
                         let response = Response::SignedPeers(verified_peers);
                         query.response(from, response.clone());
 
-                        return Some((target, response));
+                        result = Some((target, response));
                     }
                 }
                 MessageType::Response(ResponseSpecific::GetImmutable(
@@ -134,18 +130,17 @@ impl Core {
                         let response = Response::Immutable(v);
                         query.response(from, response.clone());
 
-                        return Some((target, response));
+                        result = Some((target, response));
+                    } else {
+                        debug!(
+                            ?v,
+                            ?target,
+                            ?responder_id,
+                            ?from,
+                            ?from_version,
+                            "Invalid immutable value"
+                        );
                     }
-
-                    let target = query.target();
-                    debug!(
-                        ?v,
-                        ?target,
-                        ?responder_id,
-                        ?from,
-                        ?from_version,
-                        "Invalid immutable value"
-                    );
                 }
                 MessageType::Response(ResponseSpecific::GetMutable(
                     GetMutableResponseArguments {
@@ -168,7 +163,7 @@ impl Core {
                             let response = Response::Mutable(item);
                             query.response(from, response.clone());
 
-                            return Some((target, response));
+                            result = Some((target, response));
                         }
                         Err(error) => {
                             debug!(
@@ -227,19 +222,15 @@ impl Core {
             };
         };
 
-        if should_add_node {
-            // Add a node to our routing table on any expected incoming response.
+        if should_add_node && let Some(id) = author_id {
+            self.routing_table.add(Node::new(id, from));
 
-            if let Some(id) = author_id {
-                self.routing_table.add(Node::new(id, from));
-
-                if supports_signed_peers(message.version) {
-                    self.signed_peers_routing_table.add(Node::new(id, from));
-                }
+            if supports_signed_peers(message.version) {
+                self.signed_peers_routing_table.add(Node::new(id, from));
             }
         }
 
-        None
+        result
     }
 }
 
