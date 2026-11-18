@@ -217,13 +217,14 @@ impl IterativeQuery {
 
     /// Returns true if it is done.
     pub fn is_done(&self, socket: &KrpcSocket) -> bool {
-        // Converged once the closest K non-failed candidates have answered.
-        // A closer slow request still matters; farther stragglers do not.
+        // Converged once the closest K candidates, excluding soft-timed-out
+        // requests, have answered. Late replies still count while the query is
+        // active, but silent candidates must not hold up their replacements.
         let mut answered = 0;
         for node in self.closest.nodes() {
             match self.visited.get(&node.address()) {
                 Some(None) => answered += 1,
-                Some(Some(tid)) if !socket.inflight(tid) => continue,
+                Some(Some(tid)) if !socket.pending(tid) => continue,
                 _ => break,
             }
             if answered == MAX_BUCKET_SIZE_K {
@@ -294,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn closer_slow_candidate_blocks_convergence_until_hard_timeout() {
+    async fn closer_slow_candidate_does_not_block_answered_replacements() {
         let mut socket = KrpcSocket::client().unwrap();
         let (mut query, addresses) = query_with_candidates(21);
         query.visit_closest(&mut socket);
@@ -303,9 +304,24 @@ mod tests {
         for address in &addresses[1..] {
             query.responded(*address);
         }
-        // Twenty answers are not enough if a closer candidate can still answer.
+        assert!(query.is_done(&socket));
+        let slow_tid = query.visited[&addresses[0]].unwrap();
+        assert!(socket.inflight(&slow_tid));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closer_candidate_blocks_convergence_before_soft_timeout() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let (mut query, addresses) = query_with_candidates(21);
+        for address in &addresses[1..] {
+            query.visit(&mut socket, *address);
+            query.responded(*address);
+        }
+        query.visit_closest(&mut socket);
         assert!(!query.is_done(&socket));
-        tokio::time::advance(Duration::from_secs(14)).await;
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!query.is_done(&socket));
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(query.is_done(&socket));
     }
 
