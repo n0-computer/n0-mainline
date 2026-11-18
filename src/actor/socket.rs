@@ -8,9 +8,10 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::io::{self, ErrorKind, IoSliceMut};
 use std::net::{SocketAddr, SocketAddrV4};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::Interest;
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 
 use crate::common::{ErrorSpecific, Message, MessageType, RequestSpecific, ResponseSpecific};
@@ -23,7 +24,10 @@ const MTU: usize = 2048;
 
 const DEFAULT_PORT: u16 = 6881;
 
-const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+/// A slow request stops holding a candidate slot, but may still answer.
+const SOFT_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+/// Stop waiting for a request and discard its response after this deadline.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
@@ -242,6 +246,13 @@ impl KrpcSocket {
         self.inflight_requests.get(*transaction_id).is_some()
     }
 
+    /// Whether a request should still hold a lookup candidate slot.
+    pub fn pending(&self, transaction_id: &u32) -> bool {
+        self.inflight_requests
+            .get(*transaction_id)
+            .is_some_and(|request| request.sent_at.elapsed() < SOFT_REQUEST_TIMEOUT)
+    }
+
     /// Send a request to the given address and return the transaction_id.
     /// The packet is queued; call [`Self::flush`] to actually send.
     pub fn request(&mut self, address: SocketAddrV4, request: RequestSpecific) -> u32 {
@@ -409,7 +420,7 @@ impl KrpcSocket {
     fn is_expected_response(&mut self, message: &Message, from: &SocketAddrV4) -> bool {
         // Positive or an error response to an inflight request. Check the sender before
         // removing the request, so that nobody else can end it.
-        let Some(request) = self.inflight_requests.peek(message.transaction_id) else {
+        let Some(request) = self.inflight_requests.get(message.transaction_id) else {
             trace!(
                 context = "socket_validation",
                 message = "Unexpected response id, or timedout request"
@@ -519,8 +530,6 @@ impl Debug for InflightRequest {
 struct InflightRequests {
     next_tid: u32,
     requests: Vec<InflightRequest>,
-    estimated_rtt: Duration,
-    deviation_rtt: Duration,
 }
 
 impl InflightRequests {
@@ -528,8 +537,6 @@ impl InflightRequests {
         Self {
             next_tid: 0,
             requests: Vec::new(),
-            estimated_rtt: MIN_REQUEST_TIMEOUT,
-            deviation_rtt: Duration::from_secs(0),
         }
     }
 
@@ -543,7 +550,7 @@ impl InflightRequests {
     }
 
     fn request_timeout(&self) -> Duration {
-        self.estimated_rtt + self.deviation_rtt.mul_f64(4.0)
+        REQUEST_TIMEOUT
     }
 
     fn get(&self, key: u32) -> Option<&InflightRequest> {
@@ -555,13 +562,6 @@ impl InflightRequests {
         };
 
         None
-    }
-
-    /// Returns the request with this transaction id, whether or not it has timed out.
-    fn peek(&self, key: u32) -> Option<&InflightRequest> {
-        self.find_by_tid(key)
-            .ok()
-            .map(|index| &self.requests[index])
     }
 
     /// Adds a [InflightRequest] with new transaction_id, and returns that id.
@@ -577,42 +577,9 @@ impl InflightRequests {
     }
 
     fn remove(&mut self, key: u32) -> Option<InflightRequest> {
-        match self.find_by_tid(key) {
-            Ok(index) => {
-                let request = self.requests.remove(index);
-
-                self.update_rtt_estimates(request.sent_at.elapsed());
-                trace!(
-                    "Updated estimated round trip time {:?} and request timeout {:?}",
-                    self.estimated_rtt,
-                    self.request_timeout()
-                );
-
-                Some(request)
-            }
-            Err(_) => None,
-        }
-    }
-
-    fn update_rtt_estimates(&mut self, sample_rtt: Duration) {
-        if sample_rtt < MIN_REQUEST_TIMEOUT {
-            return;
-        }
-
-        // Use TCP-like alpha = 1/8, beta = 1/4
-        let alpha = 0.125;
-        let beta = 0.25;
-
-        let sample_rtt_secs = sample_rtt.as_secs_f64();
-        let est_rtt_secs = self.estimated_rtt.as_secs_f64();
-        let dev_rtt_secs = self.deviation_rtt.as_secs_f64();
-
-        let new_est_rtt = (1.0 - alpha) * est_rtt_secs + alpha * sample_rtt_secs;
-        let new_dev_rtt =
-            (1.0 - beta) * dev_rtt_secs + beta * (sample_rtt_secs - new_est_rtt).abs();
-
-        self.estimated_rtt = Duration::from_secs_f64(new_est_rtt);
-        self.deviation_rtt = Duration::from_secs_f64(new_dev_rtt);
+        self.find_by_tid(key)
+            .ok()
+            .map(|index| self.requests.remove(index))
     }
 
     fn find_by_tid(&self, tid: u32) -> Result<usize, usize> {
@@ -645,8 +612,6 @@ impl Debug for InflightRequests {
         f.debug_struct("InflightRequests")
             .field("next_tid", &self.next_tid)
             .field("requests", &non_expired)
-            .field("estimated_rtt", &self.estimated_rtt)
-            .field("deviation_rtt", &self.deviation_rtt)
             .field("request_timeout", &timeout)
             .finish()
     }
@@ -851,7 +816,39 @@ mod test {
         assert_eq!(received[0].0.transaction_id, 8);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn soft_timeout_keeps_replies_but_hard_timeout_rejects_them() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let address = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
+        let request = RequestSpecific {
+            requester_id: Id::random(),
+            request_type: RequestTypeSpecific::Ping,
+        };
+        let slow = socket.request(address, request.clone());
+        let expired = socket.request(address, request);
+        assert!(socket.pending(&slow));
+        tokio::time::advance(SOFT_REQUEST_TIMEOUT).await;
+        assert!(!socket.pending(&slow));
+        assert!(socket.inflight(&slow));
+        tokio::time::advance(Duration::from_secs(13)).await;
+        let reply = |transaction_id| Message {
+            transaction_id,
+            message_type: MessageType::Response(ResponseSpecific::Ping(PingResponseArguments {
+                responder_id: Id::random(),
+            })),
+            version: None,
+            read_only: false,
+            requester_ip: None,
+        };
+        assert!(socket.is_expected_response(&reply(slow), &address));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // Reject expired replies even before the next periodic cleanup.
+        assert!(!socket.is_expected_response(&reply(expired), &address));
+        socket.inflight_requests.cleanup();
+        assert!(socket.inflight_requests.requests.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn inflight_request_timeout() {
         let mut server = KrpcSocket::client().unwrap();
 
@@ -898,7 +895,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-51OFOF9U"]
     async fn late_response_does_not_inflate_request_timeout() {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
@@ -919,7 +915,7 @@ mod test {
             .await
             .unwrap();
 
-        assert!(server.inflight_requests.request_timeout() < Duration::from_secs(3));
+        assert_eq!(server.inflight_requests.request_timeout(), REQUEST_TIMEOUT);
     }
 
     /// Datagrams that arrive in one GRO batch are handed out one by one.

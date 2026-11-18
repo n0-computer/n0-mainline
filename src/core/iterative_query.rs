@@ -191,7 +191,7 @@ impl IterativeQuery {
     }
 
     pub fn visit_closest(&mut self, socket: &mut KrpcSocket) {
-        let to_visit = self.closest_candidates(|tid| socket.inflight(&tid));
+        let to_visit = self.closest_candidates(|tid| socket.pending(&tid));
 
         for address in to_visit {
             self.visit(socket, address);
@@ -200,11 +200,11 @@ impl IterativeQuery {
 
     /// Returns the nodes to visit next: the closest nodes that we did not visit yet.
     ///
-    /// Nodes that never responded and whose request is no longer in flight (`inflight`
-    /// returns false for it) are skipped before taking the closest, so that they cannot hold
-    /// on to a place among the closest nodes and end the query early.
-    pub fn closest_candidates(&self, inflight: impl Fn(u32) -> bool) -> Vec<SocketAddrV4> {
-        let unresponsive = |address: &SocketAddrV4| matches!(self.visited.get(address), Some(Some(tid)) if !inflight(*tid));
+    /// Pending requests hold a slot only until the soft timeout. Slower nodes are
+    /// skipped here, but remain eligible to answer until the hard timeout.
+    /// Responding nodes retain their place so that the search can converge.
+    pub fn closest_candidates(&self, pending: impl Fn(u32) -> bool) -> Vec<SocketAddrV4> {
+        let unresponsive = |address: &SocketAddrV4| matches!(self.visited.get(address), Some(Some(tid)) if !pending(*tid));
         self.closest
             .nodes()
             .iter()
@@ -217,12 +217,29 @@ impl IterativeQuery {
 
     /// Returns true if it is done.
     pub fn is_done(&self, socket: &KrpcSocket) -> bool {
-        // If no more inflight_requests are inflight in the socket (not timed out),
-        // then the query is done.
-        let done = !self
-            .inflight_requests
-            .iter()
-            .any(|&tid| socket.inflight(&tid));
+        // Converged once the closest K non-failed candidates have answered.
+        // A closer slow request still matters; farther stragglers do not.
+        let mut answered = 0;
+        for node in self.closest.nodes() {
+            match self.visited.get(&node.address()) {
+                Some(None) => answered += 1,
+                Some(Some(tid)) if !socket.inflight(tid) => continue,
+                _ => break,
+            }
+            if answered == MAX_BUCKET_SIZE_K {
+                return true;
+            }
+        }
+
+        // With fewer than K answers, exhaust all candidates and wait for the
+        // remaining requests' hard deadlines, including bootstrap requests.
+        let done = self
+            .closest_candidates(|tid| socket.pending(&tid))
+            .is_empty()
+            && !self
+                .inflight_requests
+                .iter()
+                .any(|&tid| socket.inflight(&tid));
 
         if done {
             debug!(id=?self.target(), closest = ?self.closest.len(), visited = ?self.visited.len(), responders = ?self.responders.len(), "Done query");
@@ -238,7 +255,97 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    fn query_with_candidates(count: u8) -> (IterativeQuery, Vec<SocketAddrV4>) {
+        let target = Id::from([0u8; 20]);
+        let mut query = IterativeQuery::new(
+            Id::random(),
+            target,
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+        );
+        let addresses = (1..=count)
+            .map(|i| {
+                let mut id = [0u8; 20];
+                id[19] = i;
+                let address = SocketAddrV4::new([127, 0, 0, i].into(), 1);
+                query.add_candidate(Node::new(id.into(), address));
+                address
+            })
+            .collect();
+        (query, addresses)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn converges_without_waiting_for_farther_stragglers() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let (mut query, addresses) = query_with_candidates(21);
+        // The farther request was sent before discovering the closer candidates.
+        query.visit(&mut socket, addresses[20]);
+        query.visit_closest(&mut socket);
+        for address in &addresses[..20] {
+            query.responded(*address);
+        }
+        assert!(query.is_done(&socket));
+        let far_tid = query.visited[&addresses[20]].unwrap();
+        assert!(socket.inflight(&far_tid));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closer_slow_candidate_blocks_convergence_until_hard_timeout() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let (mut query, addresses) = query_with_candidates(21);
+        query.visit_closest(&mut socket);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        query.visit_closest(&mut socket);
+        for address in &addresses[1..] {
+            query.responded(*address);
+        }
+        // Twenty answers are not enough if a closer candidate can still answer.
+        assert!(!query.is_done(&socket));
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(query.is_done(&socket));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_answers_can_complete_a_lookup_before_hard_timeout() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let (mut query, addresses) = query_with_candidates(21);
+        query.visit_closest(&mut socket);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        query.visit_closest(&mut socket);
+        assert!(query.visited.contains_key(&addresses[20]));
+        assert!(!query.is_done(&socket));
+        for address in &addresses[..20] {
+            query.responded(*address);
+        }
+        assert!(query.is_done(&socket));
+        assert!(
+            query
+                .closest_candidates(|tid| socket.pending(&tid))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_lookup_waits_until_hard_timeout() {
+        let mut socket = KrpcSocket::client().unwrap();
+        let (mut query, _) = query_with_candidates(3);
+        query.visit_closest(&mut socket);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            query
+                .closest_candidates(|tid| socket.pending(&tid))
+                .is_empty()
+        );
+        assert!(!query.is_done(&socket));
+        tokio::time::advance(Duration::from_secs(14)).await;
+        assert!(query.is_done(&socket));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn unresponsive_nodes_do_not_crowd_out_further_nodes() {
         let mut socket = KrpcSocket::client().unwrap();
         let target = Id::random();
@@ -263,9 +370,8 @@ mod tests {
         query.add_candidate(Node::new(id.into(), further));
 
         query.visit_closest(&mut socket);
-        while !query.is_done(&socket) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!query.is_done(&socket));
         query.visit_closest(&mut socket);
 
         assert!(query.visited.contains_key(&further));
