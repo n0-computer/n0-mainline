@@ -27,6 +27,7 @@ impl Core {
 
         // The socket only hands us responses to our own requests, from the
         // address we sent them to, so the responder exists at that address.
+        let mut should_add_node = true;
         let mut result = None;
         let author_id = message.get_author_id();
         let from_version = message.version.to_owned();
@@ -103,6 +104,8 @@ impl Core {
                             ?from_version,
                             "Invalid immutable value"
                         );
+
+                        should_add_node = false;
                     }
                 }
                 MessageType::Response(ResponseSpecific::GetMutable(
@@ -136,6 +139,8 @@ impl Core {
                                 ?from_version,
                                 "Invalid mutable record"
                             );
+
+                            should_add_node = false;
                         }
                     }
                 }
@@ -185,7 +190,7 @@ impl Core {
             };
         };
 
-        if let Some(id) = author_id {
+        if should_add_node && let Some(id) = author_id {
             self.routing_table.add(Node::new(id, from));
         }
 
@@ -209,9 +214,60 @@ mod tests {
     use super::*;
     use crate::{
         actor::socket::KrpcSocket,
-        common::{FindNodeRequestArguments, FindNodeResponseArguments},
+        common::{
+            FindNodeRequestArguments, FindNodeResponseArguments, GetValueRequestArguments,
+            hash_immutable,
+        },
         core::GetRequestSpecific,
     };
+
+    #[tokio::test]
+    async fn invalid_values_do_not_add_responder() {
+        let mut core = Core::new(
+            Id::random(),
+            vec![],
+            crate::Mode::Client,
+            Default::default(),
+        );
+        let mut socket = KrpcSocket::client().unwrap();
+        let v: Box<[u8]> = Box::from(&b"value"[..]);
+        let target = Id::from_bytes(hash_immutable(&v)).unwrap();
+        let (mut query, _) = core
+            .create_iterative_query(
+                GetRequestSpecific::GetValue(GetValueRequestArguments {
+                    target,
+                    seq: None,
+                    salt: None,
+                }),
+                None,
+            )
+            .unwrap();
+        let liar = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
+        let honest = SocketAddrV4::new([203, 0, 113, 2].into(), 6881);
+        let liar_tid = query.visit(&mut socket, liar);
+        let honest_tid = query.visit(&mut socket, honest);
+        core.iterative_queries.insert(target, query);
+
+        let response = |transaction_id, v| Message {
+            transaction_id,
+            version: None,
+            requester_ip: None,
+            read_only: false,
+            message_type: MessageType::Response(ResponseSpecific::GetImmutable(
+                GetImmutableResponseArguments {
+                    responder_id: Id::random(),
+                    token: Box::new([1]),
+                    nodes: None,
+                    v,
+                },
+            )),
+        };
+        core.handle_response(liar, response(liar_tid, Box::from(&b"other"[..])));
+        core.handle_response(honest, response(honest_tid, v));
+
+        let addresses: Vec<_> = core.routing_table.nodes().map(|n| n.address()).collect();
+        assert_eq!(addresses, [honest]);
+    }
 
     #[tokio::test]
     async fn internet_node_cannot_aim_requests_at_local_network() {
