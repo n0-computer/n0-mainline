@@ -1,6 +1,6 @@
 //! Run a public DHT server and report routing-table health and incoming queries.
 //!
-//! cargo run --release --example server_monitor -- --public-ip YOUR_PUBLIC_IPV4
+//! cargo run --release --example server_monitor
 //! Allow inbound UDP on the selected port (6881 by default).
 
 use std::{
@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use clap::Parser;
 use n0_mainline::{Dht, Mode, RequestFilter, RequestSpecific, ServerSettings};
 
@@ -19,9 +20,9 @@ const MAX_QUERY_IPS: usize = 10_000;
 #[derive(Debug, Parser)]
 #[command(about = "Run an idle DHT server and periodically print health statistics")]
 struct Args {
-    /// Actual public IPv4 address, used to generate the node ID.
+    /// Override public IPv4 discovery from DHT bootstrap replies.
     #[arg(long)]
-    public_ip: Ipv4Addr,
+    public_ip: Option<Ipv4Addr>,
     /// UDP port to listen on; allow this port through your firewall/NAT.
     #[arg(long, default_value_t = 6881, value_parser = clap::value_parser!(u16).range(1..))]
     port: u16,
@@ -95,6 +96,27 @@ impl Reports {
     }
 }
 
+/// Bootstrap a temporary client to learn the public IP before choosing a server node ID.
+async fn discover_public_ip(bootstrap: &[String]) -> anyhow::Result<Ipv4Addr> {
+    let mut builder = Dht::builder();
+    builder.port(0);
+    if !bootstrap.is_empty() {
+        builder.bootstrap(bootstrap);
+    }
+    let client = builder.build()?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        client.bootstrapped().await?;
+        client
+            .info()
+            .await?
+            .public_address()
+            .map(|address| *address.ip())
+            .context("DHT replies supplied no public IPv4 address; use --public-ip")
+    })
+    .await
+    .context("Public IPv4 discovery timed out; use --public-ip")?
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -110,11 +132,21 @@ async fn main() -> anyhow::Result<()> {
     let notify = stop.clone();
     ctrlc::set_handler(move || notify.notify_one())?;
 
+    let public_ip = match args.public_ip {
+        Some(ip) => ip,
+        None => {
+            eprintln!("Discovering public IPv4 address from DHT bootstrap replies...");
+            tokio::select! {
+                _ = stop.notified() => return Ok(()),
+                result = discover_public_ip(&args.bootstrap) => result?,
+            }
+        }
+    };
     let counter = Counter::default();
     let mut builder = Dht::builder();
     builder
         .mode(Mode::Server)
-        .public_ip(args.public_ip)
+        .public_ip(public_ip)
         .port(args.port)
         .server_settings(ServerSettings {
             filter: Box::new(counter.clone()),
@@ -128,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "node_id={} public_ip={} local_address={} interval_secs={} duration_secs={}",
         info.id(),
-        args.public_ip,
+        public_ip,
         info.local_addr(),
         args.interval_secs,
         args.duration_secs,

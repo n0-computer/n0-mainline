@@ -20,13 +20,20 @@ cargo run --example logging
 
 ### Monitor a public server
 
-Run from a machine with a reachable UDP port. Replace `YOUR_PUBLIC_IPV4` with
-its actual external IPv4 address and allow inbound UDP on port 6881 (or use
-`--port` to choose another port):
+Run from a machine with a reachable UDP port. Allow inbound UDP on port 6881
+(or use `--port` to choose another port):
 
 ```sh
-cargo run --release --example server_monitor -- --public-ip YOUR_PUBLIC_IPV4 | tee server-monitor.log
+cargo run --release --example server_monitor | tee server-monitor.log
 ```
+
+A temporary client first discovers the public IPv4 address from DHT bootstrap
+replies, then the server uses it to generate its node ID. No extra discovery
+service or dependency is needed. The bootstrap wait has a 20-second timeout;
+if discovery fails, the example exits with an error. Use `--public-ip YOUR_PUBLIC_IPV4`
+to override discovery, for example on a machine with multiple egress addresses.
+Discovery does not open a firewall/NAT port or prove inbound reachability, and it
+uses a separate temporary socket; the server still listens on the configured port.
 
 The server runs for 24 hours, reporting every 60 seconds. Use `--duration-secs`
 and `--interval-secs` to change these, or Ctrl-C to stop early. It bootstraps and
