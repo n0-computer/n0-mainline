@@ -19,32 +19,7 @@ impl Testnet {
     ///
     /// This will await until all nodes are [bootstrapped][Dht::bootstrapped].
     pub async fn new(count: usize) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, false, None).await?;
-
-        for node in &testnet.nodes {
-            node.bootstrapped().await?;
-        }
-
-        Ok(testnet)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn new_without_signed_peers(count: usize) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, true, None).await?;
-
-        for node in &testnet.nodes {
-            node.bootstrapped().await?;
-        }
-
-        Ok(testnet)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn new_with_bootstrap(
-        count: usize,
-        bootstrap: &[String],
-    ) -> Result<Testnet, std::io::Error> {
-        let testnet = Testnet::new_inner(count, false, Some(bootstrap.to_vec())).await?;
+        let testnet = Testnet::new_inner(count, None).await?;
 
         for node in &testnet.nodes {
             node.bootstrapped().await?;
@@ -55,21 +30,13 @@ impl Testnet {
 
     async fn new_inner(
         count: usize,
-        disable_signed_peers: bool,
         bootstrap: Option<Vec<String>>,
     ) -> Result<Testnet, std::io::Error> {
         let mut nodes: Vec<Dht> = vec![];
         let mut bootstrap = bootstrap.unwrap_or_default();
 
         for i in 0..count {
-            let mut builder = Dht::builder();
-
-            if disable_signed_peers {
-                #[cfg(test)]
-                builder.disable_signed_peers();
-            }
-
-            let node = builder
+            let node = Dht::builder()
                 .mode(crate::Mode::Server)
                 .bootstrap(&bootstrap)
                 .build()?;

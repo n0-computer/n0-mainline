@@ -3,35 +3,25 @@ use std::time::Instant;
 
 use crate::RequestSpecific;
 use crate::common::messages::MessageType;
-use crate::core::{Core, REQUESTER_PING_INTERVAL, supports_signed_peers};
+use crate::core::{Core, REQUESTER_PING_INTERVAL};
 
-use crate::common::{RequestTypeSpecific, RoutingTable};
+use crate::common::RequestTypeSpecific;
 
 impl Core {
     pub fn handle_request(
         &mut self,
         from: SocketAddrV4,
         request_from_read_only_node: bool,
-        version: Option<[u8; 4]>,
         request_specific: RequestSpecific,
     ) -> Option<MessageType> {
         if self.mode != crate::Mode::Server || !self.server.allow_request(&request_specific, from) {
             return None;
         }
 
-        self.maybe_ping_requester(
-            from,
-            version,
-            request_from_read_only_node,
-            &request_specific,
-        );
+        self.maybe_ping_requester(from, request_from_read_only_node, &request_specific);
 
-        self.server.handle_allowed_request(
-            &self.routing_table,
-            &self.signed_peers_routing_table,
-            from,
-            request_specific,
-        )
+        self.server
+            .handle_allowed_request(&self.routing_table, from, request_specific)
     }
 
     /// Pings a requester that we might want in our routing tables.
@@ -42,30 +32,21 @@ impl Core {
     /// our random transaction id and the address we pinged, adds it in
     /// [`Core::handle_response`].
     ///
-    /// We only do this for `find_node` requests, and only in two cases:
-    ///
-    /// 1. While we have no bootstrap nodes, e.g. as the first node of a DHT;
-    ///    otherwise our routing table would never be populated.
-    /// 2. For requesters that claim to support signed peers, so that the
-    ///    `signed_peers_routing_table` can be bootstrapped.
+    /// We only do this for `find_node` requests.
     fn maybe_ping_requester(
         &mut self,
         from: SocketAddrV4,
-        version: Option<[u8; 4]>,
         request_from_read_only_node: bool,
         request_specific: &RequestSpecific,
     ) {
         let RequestTypeSpecific::FindNode(_) = request_specific.request_type else {
             return;
         };
-        let supports_signed_peers = supports_signed_peers(version);
-        if request_from_read_only_node || !(self.bootstrap.is_empty() || supports_signed_peers) {
-            return;
-        }
-
-        let known = |table: &RoutingTable| table.nodes().any(|node| node.address() == from);
-        if known(&self.routing_table)
-            && (!supports_signed_peers || known(&self.signed_peers_routing_table))
+        if request_from_read_only_node
+            || self
+                .routing_table
+                .nodes()
+                .any(|node| node.address() == from)
         {
             return;
         }
@@ -127,7 +108,6 @@ mod tests {
         core.handle_request(
             from,
             read_only,
-            Some(crate::core::VERSION),
             RequestSpecific {
                 requester_id: Id::from_ipv4(*from.ip()),
                 request_type: RequestTypeSpecific::FindNode(FindNodeRequestArguments {
@@ -164,7 +144,6 @@ mod tests {
         assert_eq!(response.is_some(), allow && mode == Mode::Server);
         // A request alone never adds the requester.
         assert!(core.routing_table.is_empty());
-        assert!(core.signed_peers_routing_table.is_empty());
         let should_ping = allow && mode == Mode::Server && !read_only;
         let pings = core.take_pending_pings();
         assert_eq!(pings, if should_ping { vec![from] } else { vec![] });
@@ -203,12 +182,10 @@ mod tests {
 
         let id = Id::from_ipv4(*from.ip());
         ping_response(&mut core, from, id);
-        for table in [&core.routing_table, &core.signed_peers_routing_table] {
-            let nodes: Vec<_> = table.nodes().collect();
-            assert_eq!(nodes.len(), 1);
-            assert_eq!(*nodes[0].id(), id);
-            assert_eq!(nodes[0].address(), from);
-        }
+        let nodes: Vec<_> = core.routing_table.nodes().collect();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(*nodes[0].id(), id);
+        assert_eq!(nodes[0].address(), from);
     }
 
     #[test]

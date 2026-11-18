@@ -70,8 +70,6 @@ pub enum RequestTypeSpecific {
     FindNode(FindNodeRequestArguments),
     /// Look up announced peers for an info hash ([BEP_0005](https://www.bittorrent.org/beps/bep_0005.html)).
     GetPeers(GetPeersRequestArguments),
-    /// Look up signed peers for an info hash (proposed signed-peers BEP).
-    GetSignedPeers(GetPeersRequestArguments),
     /// Get a value (immutable or mutable) by target ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
     GetValue(GetValueRequestArguments),
 
@@ -99,8 +97,6 @@ pub struct PutRequest {
 pub enum PutRequestSpecific {
     /// Announce that the sender is a peer for an info hash ([BEP_0005](https://www.bittorrent.org/beps/bep_0005.html)).
     AnnouncePeer(AnnouncePeerRequestArguments),
-    /// Announce a signed peer for an info hash (proposed signed-peers BEP).
-    AnnounceSignedPeer(AnnounceSignedPeerRequestArguments),
     /// Store an immutable value, addressed by its sha1 hash ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
     PutImmutable(PutImmutableRequestArguments),
     /// Store a mutable value, addressed by an ed25519 public key (and optional salt) ([BEP_0044](https://www.bittorrent.org/beps/bep_0044.html)).
@@ -117,10 +113,6 @@ impl PutRequestSpecific {
             PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {
                 info_hash, ..
             }) => info_hash,
-            PutRequestSpecific::AnnounceSignedPeer(AnnounceSignedPeerRequestArguments {
-                info_hash,
-                ..
-            }) => info_hash,
             PutRequestSpecific::PutMutable(PutMutableRequestArguments { target, .. }) => target,
             PutRequestSpecific::PutImmutable(PutImmutableRequestArguments { target, .. }) => target,
         }
@@ -132,7 +124,6 @@ pub enum ResponseSpecific {
     Ping(PingResponseArguments),
     FindNode(FindNodeResponseArguments),
     GetPeers(GetPeersResponseArguments),
-    GetSignedPeers(GetSignedPeersResponseArguments),
     GetImmutable(GetImmutableResponseArguments),
     GetMutable(GetMutableResponseArguments),
     NoValues(NoValuesResponseArguments),
@@ -191,14 +182,6 @@ pub struct GetPeersResponseArguments {
     pub nodes: Option<Box<[Node]>>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct GetSignedPeersResponseArguments {
-    pub responder_id: Id,
-    pub token: Box<[u8]>,
-    pub peers: Vec<([u8; 32], u64, [u8; 64])>,
-    pub nodes: Option<Box<[Node]>>,
-}
-
 // === Announce Peer ===
 
 #[derive(Debug, PartialEq, Clone)]
@@ -206,14 +189,6 @@ pub struct AnnouncePeerRequestArguments {
     pub info_hash: Id,
     pub port: u16,
     pub implied_port: Option<bool>,
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct AnnounceSignedPeerRequestArguments {
-    pub info_hash: Id,
-    pub t: u64,
-    pub k: [u8; 32],
-    pub sig: [u8; 64],
 }
 
 // === Get Immutable ===
@@ -283,7 +258,6 @@ impl Message {
                 ResponseSpecific::Ping(arguments) => arguments.responder_id,
                 ResponseSpecific::FindNode(arguments) => arguments.responder_id,
                 ResponseSpecific::GetPeers(arguments) => arguments.responder_id,
-                ResponseSpecific::GetSignedPeers(arguments) => arguments.responder_id,
                 ResponseSpecific::GetImmutable(arguments) => arguments.responder_id,
                 ResponseSpecific::GetMutable(arguments) => arguments.responder_id,
                 ResponseSpecific::NoValues(arguments) => arguments.responder_id,
@@ -304,7 +278,6 @@ impl Message {
                 ResponseSpecific::Ping(_) => None,
                 ResponseSpecific::FindNode(arguments) => Some(&arguments.nodes),
                 ResponseSpecific::GetPeers(arguments) => arguments.nodes.as_deref(),
-                ResponseSpecific::GetSignedPeers(arguments) => arguments.nodes.as_deref(),
                 ResponseSpecific::GetMutable(arguments) => arguments.nodes.as_deref(),
                 ResponseSpecific::GetImmutable(arguments) => arguments.nodes.as_deref(),
                 ResponseSpecific::NoValues(arguments) => arguments.nodes.as_deref(),
@@ -320,9 +293,6 @@ impl Message {
                 ResponseSpecific::Ping(_) => None,
                 ResponseSpecific::FindNode(_) => None,
                 ResponseSpecific::GetPeers(arguments) => {
-                    Some((arguments.responder_id, &arguments.token))
-                }
-                ResponseSpecific::GetSignedPeers(arguments) => {
                     Some((arguments.responder_id, &arguments.token))
                 }
                 ResponseSpecific::GetImmutable(arguments) => {
@@ -405,34 +375,6 @@ fn bytes_to_nodes4<T: AsRef<[u8]>>(bytes: T) -> Result<Box<[Node]>, DecodeMessag
     Ok(to_ret.into_boxed_slice())
 }
 
-fn bytes_to_signed_peer<T: AsRef<[u8]>>(
-    bytes: T,
-) -> Result<([u8; 32], u64, [u8; 64]), DecodeMessageError> {
-    // Each entry is exactly one record as written by `signed_peer_to_bytes`.
-    let bytes: &[u8; 104] = bytes
-        .as_ref()
-        .try_into()
-        .map_err(|_| DecodeMessageError::InvalidSignedPeersEncodingLength)?;
-    let (key, rest) = bytes.split_at(32);
-    let (t, sig) = rest.split_at(8);
-
-    Ok((
-        key.try_into().expect("32 bytes"),
-        u64::from_be_bytes(t.try_into().expect("8 bytes")),
-        sig.try_into().expect("64 bytes"),
-    ))
-}
-
-fn signed_peer_to_bytes(peer: &([u8; 32], u64, [u8; 64])) -> [u8; 104] {
-    let mut bytes = [0; 104];
-
-    bytes[0..32].copy_from_slice(&peer.0);
-    bytes[32..40].copy_from_slice(&peer.1.to_be_bytes());
-    bytes[40..].copy_from_slice(&peer.2);
-
-    bytes
-}
-
 #[n0_error::stack_error(derive, from_sources, std_sources)]
 /// Mainline crate error enum.
 pub enum DecodeMessageError {
@@ -472,10 +414,6 @@ pub enum DecodeMessageError {
     /// Invalid transaction id size (expected `[u8;2]` or `[u8;4]`)
     InvalidTransactionIdSize,
 
-    #[error("Wrong number of bytes for signed peers")]
-    /// Wrong number of bytes for signed peers
-    InvalidSignedPeersEncodingLength,
-
     #[error("Mutable put message must have a sequence number and a signature")]
     /// Mutable put message must have a sequence number and a signature
     MissingMutablePutSequenceOrSignature,
@@ -484,27 +422,6 @@ pub enum DecodeMessageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_signed_peers_entry_of_wrong_length() {
-        let response = |entry: &[u8]| {
-            let mut bytes = b"d1:rd2:id20:abcdefghij01234567895:peersl".to_vec();
-            bytes.extend_from_slice(format!("{}:", entry.len()).as_bytes());
-            bytes.extend_from_slice(entry);
-            bytes.extend_from_slice(b"e5:token2:tke1:t2:aa1:y1:re");
-            Message::from_bytes(&bytes)
-        };
-        assert!(response(&[7; 104]).is_ok());
-        for len in [0, 40, 103, 105, 208] {
-            assert!(
-                matches!(
-                    response(&vec![7; len]),
-                    Err(DecodeMessageError::InvalidSignedPeersEncodingLength)
-                ),
-                "entry of {len} bytes"
-            );
-        }
-    }
 
     #[test]
     fn test_ping_request() {
@@ -806,11 +723,5 @@ mod tests {
     fn test_deeply_nested_message_returns_error() {
         let bytes = [b"d1:a".as_slice(), &[b'l'; 60_000]].concat();
         assert!(Message::from_bytes(&bytes).is_err());
-    }
-
-    #[test]
-    fn test_get_signed_peers_response_with_empty_peer_returns_error() {
-        let bytes = b"d1:t2:\x00\x001:y1:r1:rd2:id20:AAAAAAAAAAAAAAAAAAAA5:token1:x5:peersl0:eee";
-        assert!(Message::from_bytes(bytes).is_err());
     }
 }

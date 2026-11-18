@@ -14,7 +14,6 @@ pub struct Info {
     mode: crate::Mode,
 
     routing_table_size: usize,
-    singing_peers_routing_table_size: usize,
 }
 
 impl Info {
@@ -52,11 +51,6 @@ impl Info {
     pub fn routing_table_size(&self) -> usize {
         self.routing_table_size
     }
-
-    /// Returns the size of the routing table of nodes supporting signed peers BEP
-    pub fn singing_peers_routing_table_size(&self) -> usize {
-        self.singing_peers_routing_table_size
-    }
 }
 
 impl From<&Actor> for Info {
@@ -68,7 +62,6 @@ impl From<&Actor> for Info {
             local_addr: actor.socket.local_addr(),
             dht_size_estimate: actor.core.routing_table.dht_size_estimate(),
             routing_table_size: actor.core.routing_table.size(),
-            singing_peers_routing_table_size: actor.core.signed_peers_routing_table.size(),
         }
     }
 }

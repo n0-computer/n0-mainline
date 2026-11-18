@@ -16,9 +16,6 @@ exclude = ["/docs/*", "/examples/*", "/beps/*"]
 
 [features]
 default = []
-# Enables APIs related to signed peers, which is not yet a published BEP
-# and is therefore considered unstable.
-unstable_signed_peers = []
 
 [dependencies]
 hex = "0.4"
@@ -60,11 +57,3 @@ rustdoc-args = ["--cfg", "n0_mainline_docsrs"]
 # require a feature enabled when using `--cfg docsrs`, which we cannot do.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(n0_mainline_docsrs)"] }
-
-[[example]]
-name = "announce_signed_peer"
-required-features = ["unstable_signed_peers"]
-
-[[example]]
-name = "get_signed_peers"
-required-features = ["unstable_signed_peers"]

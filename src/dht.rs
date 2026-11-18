@@ -15,10 +15,9 @@ use crate::{
     Node, ServerSettings,
     actor::{ActorMessage, Info, ResponseSender, config::Config, socket::DatagramHook},
     common::{
-        AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, FindNodeRequestArguments,
-        GetPeersRequestArguments, GetValueRequestArguments, Id, MutableItem,
-        PutImmutableRequestArguments, PutMutableRequestArguments, PutRequestSpecific,
-        SignedAnnounce, hash_immutable,
+        AnnouncePeerRequestArguments, FindNodeRequestArguments, GetPeersRequestArguments,
+        GetValueRequestArguments, Id, MutableItem, PutImmutableRequestArguments,
+        PutMutableRequestArguments, PutRequestSpecific, hash_immutable,
     },
     core::{ConcurrencyError, PutError, PutQueryError, iterative_query::GetRequestSpecific},
 };
@@ -105,14 +104,6 @@ impl DhtBuilder {
     /// Remove the existing bootstrapping nodes, usually to create the first node in a new network.
     pub fn no_bootstrap(&mut self) -> &mut Self {
         self.0.bootstrap = vec![];
-
-        self
-    }
-
-    /// Used to simulate a DHT that doesn't support `announce_signed_peers`
-    #[cfg(test)]
-    fn disable_signed_peers(&mut self) -> &mut Self {
-        self.0.disable_announce_signed_peers = true;
 
         self
     }
@@ -309,78 +300,6 @@ impl Dht {
         )
         .await
         .map_err(put_error_to_query_error)
-    }
-
-    // === Signed Peers ===
-
-    /// Announce a signed peer for a given infohash.
-    ///
-    /// ## Namespacing
-    /// It is important to distinguish your overlay network and any other differentiator like a
-    /// sub-network or geographical distribution, by namespacing your `info_hash`, to avoid getting
-    /// signed peers you can't or don't want to connect to.
-    ///
-    /// The easiest way for namespacing is to hash a concatenation of your original `info_hash`
-    /// with the name of your network and any other filters, then pass the first 20 bytes as the
-    /// `info_hash` to this method.
-    ///
-    /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    #[cfg(feature = "unstable_signed_peers")]
-    #[cfg_attr(n0_mainline_docsrs, doc(cfg(feature = "unstable_signed_peers")))]
-    pub async fn announce_signed_peer(
-        &self,
-        info_hash: Id,
-        signer: &SigningKey,
-    ) -> Result<Id, PutQueryError> {
-        let signed_announce = SignedAnnounce::new(signer, &info_hash);
-
-        self.put(
-            PutRequestSpecific::AnnounceSignedPeer(AnnounceSignedPeerRequestArguments {
-                info_hash,
-                k: *signed_announce.key(),
-                t: signed_announce.timestamp(),
-                sig: *signed_announce.signature(),
-            }),
-            None,
-        )
-        .await
-        .map_err(put_error_to_query_error)
-    }
-
-    /// Get peers verifiably announced for a given infohash by their public key.
-    ///
-    /// ## Namespacing
-    /// It is important to distinguish your overlay network and any other differentiator like a
-    /// sub-network or geographical distribution, by namespacing your `info_hash`, to avoid getting
-    /// signed peers you can't or don't want to connect to.
-    ///
-    /// The easiest way for namespacing is to hash a concatenation of your original `info_hash`
-    /// with the name of your network and any other filters, then pass the first 20 bytes as the
-    /// `info_hash` to this method.
-    ///
-    /// Note: each node of the network will only return a _random_ subset (usually 20)
-    /// of the total peers it has for a given infohash, so if you are getting responses
-    /// from 20 nodes, you can expect up to 400 peers in total, but if there are more
-    /// announced peers on that infohash, you are likely to miss some, the logic here
-    /// for Bittorrent is that any peer will introduce you to more peers through "peer exchange"
-    /// so if you are implementing something different from Bittorrent, you might want
-    /// to implement your own logic for gossipping more peers after you discover the first ones.
-    ///
-    /// Read [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) for more information.
-    #[cfg(feature = "unstable_signed_peers")]
-    #[cfg_attr(n0_mainline_docsrs, doc(cfg(feature = "unstable_signed_peers")))]
-    pub async fn get_signed_peers(
-        &self,
-        info_hash: Id,
-    ) -> Result<GetStream<Vec<SignedAnnounce>>, ActorShutdown> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.send(ActorMessage::Get(
-            GetRequestSpecific::GetSignedPeers(GetPeersRequestArguments { info_hash }),
-            ResponseSender::SignedPeers(tx),
-        ))
-        .await?;
-
-        Ok(GetStream(rx))
     }
 
     // === Immutable data ===
@@ -1069,128 +988,6 @@ mod test {
             .unwrap();
 
         assert!(client.bootstrapped().await.unwrap());
-    }
-
-    #[cfg(feature = "unstable_signed_peers")]
-    #[tokio::test]
-    async fn announce_signed_peers_at_full_adoption() {
-        let testnet = Testnet::new(10).await.unwrap();
-
-        let a = Dht::builder()
-            .bootstrap(&testnet.bootstrap)
-            .build()
-            .unwrap();
-        let b = Dht::builder()
-            .bootstrap(&testnet.bootstrap)
-            .build()
-            .unwrap();
-
-        let info_hash = Id::random();
-
-        let signers = [0, 1, 2]
-            .iter()
-            .map(|_| {
-                let mut secret_key = [0; 32];
-                rand::rng().fill_bytes(&mut secret_key);
-                SigningKey::from_bytes(&secret_key)
-            })
-            .collect::<Vec<_>>();
-
-        let mut expected_keys = signers
-            .iter()
-            .map(|s| s.verifying_key().as_bytes().to_vec())
-            .collect::<Vec<_>>();
-        expected_keys.sort();
-
-        for signer in signers {
-            a.announce_signed_peer(info_hash, &signer)
-                .await
-                .expect("failed to announce");
-        }
-
-        let peers = b
-            .get_signed_peers(info_hash)
-            .await
-            .unwrap()
-            .next()
-            .await
-            .expect("No peers");
-
-        let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
-        keys.sort();
-
-        assert_eq!(keys, expected_keys);
-    }
-
-    #[cfg(feature = "unstable_signed_peers")]
-    #[tokio::test]
-    async fn announce_signed_peers_at_low_adoption() {
-        let testnet_legacy = Testnet::new_without_signed_peers(10).await.unwrap();
-
-        let signers = [0, 1, 2]
-            .iter()
-            .map(|_| {
-                let mut secret_key = [0; 32];
-                rand::rng().fill_bytes(&mut secret_key);
-                SigningKey::from_bytes(&secret_key)
-            })
-            .collect::<Vec<_>>();
-
-        let mut expected_keys = signers
-            .iter()
-            .map(|s| s.verifying_key().as_bytes().to_vec())
-            .collect::<Vec<_>>();
-        expected_keys.sort();
-
-        let info_hash = Id::random();
-
-        // confirm that our code disables `signed_announce_peers` for older versions
-        {
-            let a = Dht::builder()
-                .bootstrap(&testnet_legacy.bootstrap)
-                .disable_signed_peers()
-                .build()
-                .unwrap();
-            assert!(
-                a.announce_signed_peer(info_hash, &signers[0])
-                    .await
-                    .is_err()
-            );
-            assert_eq!(
-                a.get_signed_peers(info_hash).await.unwrap().next().await,
-                None
-            )
-        }
-
-        {
-            let testnet_new = Testnet::new_with_bootstrap(3, &testnet_legacy.bootstrap)
-                .await
-                .unwrap();
-
-            let bootstrap = testnet_new.bootstrap;
-
-            let a = Dht::builder().bootstrap(&bootstrap).build().unwrap();
-            let b = Dht::builder().bootstrap(&bootstrap).build().unwrap();
-
-            for signer in &signers {
-                a.announce_signed_peer(info_hash, signer)
-                    .await
-                    .expect("failed to announce");
-            }
-
-            let peers = b
-                .get_signed_peers(info_hash)
-                .await
-                .unwrap()
-                .next()
-                .await
-                .expect("No peers");
-
-            let mut keys = peers.iter().map(|a| a.key().to_vec()).collect::<Vec<_>>();
-            keys.sort();
-
-            assert_eq!(keys, expected_keys);
-        }
     }
 
     #[test]
