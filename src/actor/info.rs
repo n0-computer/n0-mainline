@@ -10,9 +10,8 @@ pub struct Info {
     id: Id,
     local_addr: SocketAddrV4,
     public_address: Option<SocketAddrV4>,
-    firewalled: bool,
     dht_size_estimate: (usize, f64),
-    server_mode: bool,
+    mode: crate::Mode,
 
     routing_table_size: usize,
     singing_peers_routing_table_size: usize,
@@ -35,18 +34,9 @@ impl Info {
     pub fn public_address(&self) -> Option<SocketAddrV4> {
         self.public_address
     }
-    /// Returns `true` if we can't confirm that [Self::public_address] is publicly addressable.
-    ///
-    /// If this node is firewalled, it won't switch to server mode if it is in adaptive mode,
-    /// but if [crate::DhtBuilder::server_mode] was set to true, then whether or not this node is firewalled
-    /// won't matter.
-    pub fn firewalled(&self) -> bool {
-        self.firewalled
-    }
-
-    /// Returns whether or not this node is running in server mode.
-    pub fn server_mode(&self) -> bool {
-        self.server_mode
+    /// Returns the mode this node is running in.
+    pub fn mode(&self) -> crate::Mode {
+        self.mode
     }
 
     /// Returns:
@@ -74,8 +64,7 @@ impl From<&Actor> for Info {
         Self {
             id: *actor.id(),
             public_address: actor.core.public_address,
-            firewalled: actor.core.firewalled,
-            server_mode: actor.core.server_mode,
+            mode: actor.core.mode,
             local_addr: actor.socket.local_addr(),
             dht_size_estimate: actor.core.routing_table.dht_size_estimate(),
             routing_table_size: actor.core.routing_table.size(),

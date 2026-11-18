@@ -4,8 +4,8 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+use tracing::debug;
 use tracing::error;
-use tracing::{debug, trace};
 
 use iterative_query::IterativeQuery;
 use put_query::PutQuery;
@@ -72,15 +72,14 @@ pub struct Core {
 
     pub server: Server,
     pub public_address: Option<SocketAddrV4>,
-    pub firewalled: bool,
-    pub server_mode: bool,
+    pub mode: crate::Mode,
 }
 
 impl Core {
     pub fn new(
         id: Id,
         bootstrap: Vec<SocketAddrV4>,
-        server_mode: bool,
+        mode: crate::Mode,
         server_settings: ServerSettings,
     ) -> Self {
         Self {
@@ -97,8 +96,7 @@ impl Core {
             last_table_ping: Instant::now(),
             server: Server::new(server_settings),
             public_address: None,
-            firewalled: true,
-            server_mode,
+            mode,
         }
     }
 
@@ -175,30 +173,23 @@ impl Core {
         }
     }
 
-    /// Remove done [IterativeQuery]s, return the [Id]s of [PutQuery] ready to start,
-    /// and if done queries contained votes for new public address, return the address
-    /// to be pinged.
+    /// Remove completed queries, caching their results and reported public address.
     pub fn cleanup_done_queries(
         &mut self,
         done_get_queries: &[(Id, Box<[Node]>)],
         done_put_queries: &[(Id, Option<PutError>)],
-    ) -> Option<SocketAddrV4> {
-        let mut should_ping_alleged_new_address = None;
-
+    ) {
         for (id, closest_nodes) in done_get_queries {
             if let Some(query) = self.iterative_queries.remove(id) {
                 self.cache_iterative_query(&query, closest_nodes);
 
-                should_ping_alleged_new_address =
-                    self.update_address_votes_from_iterative_query(&query);
+                self.update_address_votes_from_iterative_query(&query);
             };
         }
 
         for (id, _) in done_put_queries {
             self.put_queries.remove(id);
         }
-
-        should_ping_alleged_new_address
     }
 
     pub fn check_nodes_to_ping_and_remove_stale_nodes(&mut self) -> Vec<SocketAddrV4> {
@@ -381,30 +372,10 @@ impl Core {
         }
     }
 
-    fn update_address_votes_from_iterative_query(
-        &mut self,
-        query: &IterativeQuery,
-    ) -> Option<SocketAddrV4> {
-        if let Some(new_address) = query.best_address() {
-            self.public_address = Some(new_address);
-
-            if self.public_address.is_none()
-                || new_address
-                    != self
-                        .public_address
-                        .expect("self.public_address is not None")
-            {
-                trace!(
-                    ?new_address,
-                    "Query responses suggest a different public_address, trying to confirm.."
-                );
-
-                self.firewalled = true;
-                return Some(new_address);
-            }
+    fn update_address_votes_from_iterative_query(&mut self, query: &IterativeQuery) {
+        if let Some(address) = query.best_address() {
+            self.public_address = Some(address);
         }
-
-        None
     }
 
     fn cache_iterative_query(&mut self, query: &IterativeQuery, closest_responding_nodes: &[Node]) {

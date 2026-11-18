@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let client = Dht::builder()
-        .server_mode()
+        .mode(n0_mainline::Mode::Server)
         .server_settings(ServerSettings {
             filter: Box::new(Filter),
             ..Default::default()

@@ -68,16 +68,6 @@ impl RoutingTable {
 
     // === Public Methods ===
 
-    pub(crate) fn reset_id(&mut self, id: Id) {
-        let old_nodes = self.to_owned_nodes();
-        self.buckets = Default::default();
-        self.id = id;
-
-        for node in old_nodes {
-            self.add(node);
-        }
-    }
-
     /// Attempts to add a node to this routing table, and return `true` if it did.
     pub fn add(&mut self, node: Node) -> bool {
         let distance = self.id.distance(node.id());
@@ -158,11 +148,6 @@ impl RoutingTable {
             node_index: 0,
             table: self,
         }
-    }
-
-    /// Export an owned vector of nodes from this routing table.
-    pub fn to_owned_nodes(&self) -> Vec<Node> {
-        self.nodes().collect()
     }
 
     /// Turn this routing table to a list of bootstrapping nodes.   

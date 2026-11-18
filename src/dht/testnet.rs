@@ -69,7 +69,10 @@ impl Testnet {
                 builder.disable_signed_peers();
             }
 
-            let node = builder.server_mode().bootstrap(&bootstrap).build()?;
+            let node = builder
+                .mode(crate::Mode::Server)
+                .bootstrap(&bootstrap)
+                .build()?;
 
             if i == 0 {
                 let info = node.info().await?;
