@@ -27,15 +27,6 @@ cargo run --example announce_peer <40 bytes hex info_hash>
 cargo run --example get_peers <40 bytes hex info_hash>
 ```
 
-### Anounce/GET Signed Peers (for overlay networks)
-```sh
-# Announce as a peer
-cargo run --example announce_signed_peer <40 bytes hex info_hash> <64 bytes hex secret key>
-
-# Find peers
-cargo run --example get_peers <40 bytes hex info_hash>
-```
-
 ### PUT/GET Arbitrary Immutable values.
 ```sh
 # Store immutable data

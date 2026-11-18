@@ -14,7 +14,6 @@ use tokio::net::UdpSocket;
 use tracing::{debug, trace, warn};
 
 use crate::common::{ErrorSpecific, Message, MessageType, RequestSpecific, ResponseSpecific};
-#[cfg(not(test))]
 use crate::core::VERSION;
 
 use super::config::Config;
@@ -27,10 +26,6 @@ const MIN_REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 /// Upper bound for the adaptive request timeout, so that slow or malicious responders can
 /// delay lookups only by a bounded amount.
 const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Version before supporting `announce_signed_peers`
-#[cfg(test)]
-const LEGACY_VERSION: [u8; 4] = [82, 83, 0, 5]; // "RS" version 05
 
 // ---------------------------------------------------------------------------
 // UdpIo – thin async wrapper around noq-udp + tokio readiness
@@ -155,9 +150,6 @@ pub struct KrpcSocket {
     /// Outgoing packets queued by sync send methods.
     outbox: VecDeque<(Vec<u8>, SocketAddr)>,
     datagram_hook: Option<DatagramHook>,
-
-    #[cfg(test)]
-    version: [u8; 4],
 }
 
 type DatagramHookFn = dyn FnMut(&[u8], SocketAddrV4) -> bool + Send + 'static;
@@ -207,13 +199,6 @@ impl KrpcSocket {
             local_addr,
             outbox: VecDeque::new(),
             datagram_hook: None,
-
-            #[cfg(test)]
-            version: if config.disable_announce_signed_peers {
-                LEGACY_VERSION
-            } else {
-                crate::core::VERSION
-            },
         })
     }
 
@@ -352,13 +337,7 @@ impl KrpcSocket {
             Ok(message) => {
                 // Parsed correctly.
                 let should_return = match message.message_type {
-                    MessageType::Request(ref _request_specific) => {
-                        // simulate legacy nodes not supporting `announce_signed_peers` and `get_signed_peers`
-                        #[cfg(test)]
-                        let should_return = supports_request(&self.version, _request_specific);
-                        #[cfg(not(test))]
-                        let should_return = true;
-
+                    MessageType::Request(_) => {
                         trace!(
                             context = "socket_message_receiving",
                             ?message,
@@ -366,7 +345,7 @@ impl KrpcSocket {
                             "Received request message"
                         );
 
-                        should_return
+                        true
                     }
                     MessageType::Response(_) => {
                         trace!(
@@ -429,7 +408,7 @@ impl KrpcSocket {
         Message {
             transaction_id,
             message_type: MessageType::Request(message),
-            version: Some(self.version()),
+            version: Some(VERSION),
             read_only: self.mode == crate::Mode::Client,
             requester_ip: None,
         }
@@ -445,18 +424,11 @@ impl KrpcSocket {
         Message {
             transaction_id: request_tid,
             message_type: message,
-            version: Some(self.version()),
+            version: Some(VERSION),
             read_only: self.mode == crate::Mode::Client,
             // BEP_0042 Only relevant in responses.
             requester_ip: Some(requester_ip),
         }
-    }
-
-    fn version(&self) -> [u8; 4] {
-        #[cfg(test)]
-        return self.version;
-        #[cfg(not(test))]
-        return VERSION;
     }
 
     /// Encode a message and queue it for sending.
@@ -615,22 +587,6 @@ impl Debug for InflightRequests {
             .field("deviation_rtt", &self.deviation_rtt)
             .field("request_timeout", &timeout)
             .finish()
-    }
-}
-
-#[cfg(test)]
-fn supports_request(version: &[u8; 4], request_specific: &crate::common::RequestSpecific) -> bool {
-    use crate::{
-        PutRequestSpecific,
-        common::{PutRequest, RequestTypeSpecific},
-    };
-    match request_specific.request_type {
-        RequestTypeSpecific::GetSignedPeers(_)
-        | RequestTypeSpecific::Put(PutRequest {
-            put_request_type: PutRequestSpecific::AnnounceSignedPeer(_),
-            ..
-        }) => version != &LEGACY_VERSION,
-        _ => true,
     }
 }
 

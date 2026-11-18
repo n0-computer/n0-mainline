@@ -2,7 +2,7 @@ pub(crate) mod config;
 mod info;
 pub(crate) mod socket;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 use crate::MutableItem;
 use crate::common::{
     FindNodeRequestArguments, Id, Message, MessageType, Node, PutRequestSpecific, RequestSpecific,
-    RequestTypeSpecific, SignedAnnounce,
+    RequestTypeSpecific,
 };
 use crate::core::{
     Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
@@ -82,15 +82,7 @@ impl Actor {
     /// Create a list of unique bootstrapping nodes from all our
     /// routing table to use as `extra_bootsrtap` in next sessions.
     fn to_bootstrap(&self) -> Vec<String> {
-        let mut set = HashSet::new();
-        for s in self.core.routing_table.to_bootstrap() {
-            set.insert(s);
-        }
-        for s in self.core.signed_peers_routing_table.to_bootstrap() {
-            set.insert(s);
-        }
-
-        set.iter().cloned().collect()
+        self.core.routing_table.to_bootstrap()
     }
 
     /// Returns a thread safe and lightweight summary of this node's
@@ -301,12 +293,9 @@ impl Actor {
     ) -> Option<(Id, Response)> {
         match message.message_type {
             MessageType::Request(request_specific) => {
-                let response = self.core.handle_request(
-                    from,
-                    message.read_only,
-                    message.version,
-                    request_specific,
-                );
+                let response = self
+                    .core
+                    .handle_request(from, message.read_only, request_specific);
 
                 match response {
                     Some(MessageType::Error(error)) => {
@@ -514,9 +503,6 @@ fn send(sender: &mut ResponseSender, response: Response) {
         (ResponseSender::Peers(s), Response::Peers(r)) => {
             let _ = s.send(r);
         }
-        (ResponseSender::SignedPeers(s), Response::SignedPeers(r)) => {
-            let _ = s.send(r);
-        }
         (ResponseSender::Mutable(s), Response::Mutable(r)) => {
             let _ = s.send(r);
         }
@@ -548,8 +534,6 @@ pub(crate) enum ActorMessage {
 pub(crate) enum ResponseSender {
     ClosestNodes(oneshot::Sender<Box<[Node]>>),
     Peers(mpsc::UnboundedSender<Vec<SocketAddrV4>>),
-    #[allow(dead_code)]
-    SignedPeers(mpsc::UnboundedSender<Vec<SignedAnnounce>>),
     Mutable(mpsc::UnboundedSender<MutableItem>),
     Immutable(Option<oneshot::Sender<Box<[u8]>>>),
 }

@@ -1,7 +1,6 @@
 //! Modules needed only for nodes running in server mode (not read-only).
 
 pub mod peers;
-pub mod signed_peers;
 pub mod tokens;
 
 use std::{fmt::Debug, net::SocketAddrV4, num::NonZeroUsize};
@@ -11,17 +10,15 @@ use lru::LruCache;
 use tracing::debug;
 
 use crate::common::{
-    AnnouncePeerRequestArguments, AnnounceSignedPeerRequestArguments, ErrorSpecific,
-    FindNodeRequestArguments, FindNodeResponseArguments, GetImmutableResponseArguments,
-    GetMutableResponseArguments, GetPeersRequestArguments, GetPeersResponseArguments,
-    GetSignedPeersResponseArguments, GetValueRequestArguments, Id, MAX_BUCKET_SIZE_K, MutableItem,
+    AnnouncePeerRequestArguments, ErrorSpecific, FindNodeRequestArguments,
+    FindNodeResponseArguments, GetImmutableResponseArguments, GetMutableResponseArguments,
+    GetPeersRequestArguments, GetPeersResponseArguments, GetValueRequestArguments, Id, MutableItem,
     NoMoreRecentValueResponseArguments, NoValuesResponseArguments, PingResponseArguments,
     PutImmutableRequestArguments, PutMutableRequestArguments, PutRequest, PutRequestSpecific,
-    RequestTypeSpecific, ResponseSpecific, RoutingTable, SignedAnnounce, validate_immutable,
+    RequestTypeSpecific, ResponseSpecific, RoutingTable, validate_immutable,
 };
 
 use peers::PeersStore;
-use signed_peers::SignedPeersStore;
 use tokens::Tokens;
 
 pub use crate::common::{MessageType, RequestSpecific};
@@ -63,8 +60,6 @@ pub struct Server {
     tokens: Tokens,
     /// Peers store
     peers: PeersStore,
-    /// signed peers store
-    signed_peers: SignedPeersStore,
     /// Immutable values store
     immutable_values: LruCache<Id, Box<[u8]>>,
     /// Mutable values store
@@ -123,13 +118,6 @@ impl Server {
                 NonZeroUsize::new(settings.max_peers_per_info_hash)
                     .unwrap_or(NonZeroUsize::new(MAX_PEERS).expect("MAX_PEERS is NonZeroUsize")),
             ),
-            signed_peers: SignedPeersStore::new(
-                NonZeroUsize::new(settings.max_info_hashes).unwrap_or(
-                    NonZeroUsize::new(MAX_INFO_HASHES).expect("MAX_PEERS is NonZeroUsize"),
-                ),
-                NonZeroUsize::new(settings.max_peers_per_info_hash)
-                    .unwrap_or(NonZeroUsize::new(MAX_PEERS).expect("MAX_PEERS is NonZeroUsize")),
-            ),
 
             immutable_values: LruCache::new(
                 NonZeroUsize::new(settings.max_immutable_values)
@@ -152,7 +140,6 @@ impl Server {
     pub(super) fn handle_allowed_request(
         &mut self,
         routing_table: &RoutingTable,
-        signing_peers_routing_table: &RoutingTable,
         from: SocketAddrV4,
         request: RequestSpecific,
     ) -> Option<MessageType> {
@@ -170,22 +157,9 @@ impl Server {
                 }))
             }
             RequestTypeSpecific::FindNode(FindNodeRequestArguments { target, .. }) => {
-                // prioritize nodes supporting signed peers..
-                let mut nodes = signing_peers_routing_table.closest(target).to_vec();
-                if nodes.len() < MAX_BUCKET_SIZE_K {
-                    nodes.extend_from_slice(
-                        &routing_table
-                            .closest(target)
-                            .iter()
-                            .take(MAX_BUCKET_SIZE_K - nodes.len())
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    );
-                }
-
                 MessageType::Response(ResponseSpecific::FindNode(FindNodeResponseArguments {
                     responder_id: *routing_table.id(),
-                    nodes: nodes.into(),
+                    nodes: routing_table.closest(target),
                 }))
             }
             RequestTypeSpecific::GetPeers(GetPeersRequestArguments { info_hash, .. }) => {
@@ -200,26 +174,6 @@ impl Server {
                         responder_id: *routing_table.id(),
                         token: self.tokens.generate_token(from).into(),
                         nodes: Some(routing_table.closest(info_hash)),
-                    }),
-                })
-            }
-            RequestTypeSpecific::GetSignedPeers(GetPeersRequestArguments { info_hash, .. }) => {
-                MessageType::Response(match self.signed_peers.get_random_peers(&info_hash) {
-                    Some(peers) => {
-                        ResponseSpecific::GetSignedPeers(GetSignedPeersResponseArguments {
-                            responder_id: *signing_peers_routing_table.id(),
-                            token: self.tokens.generate_token(from).into(),
-                            nodes: Some(signing_peers_routing_table.closest(info_hash)),
-                            peers: peers
-                                .iter()
-                                .map(|p| (*p.key(), p.timestamp(), *p.signature()))
-                                .collect(),
-                        })
-                    }
-                    None => ResponseSpecific::NoValues(NoValuesResponseArguments {
-                        responder_id: *signing_peers_routing_table.id(),
-                        token: self.tokens.generate_token(from).into(),
-                        nodes: Some(signing_peers_routing_table.closest(info_hash)),
                     }),
                 })
             }
@@ -276,54 +230,6 @@ impl Server {
                             responder_id: *routing_table.id(),
                         },
                     )));
-                }
-                PutRequestSpecific::AnnounceSignedPeer(AnnounceSignedPeerRequestArguments {
-                    info_hash,
-                    t,
-                    k,
-                    sig,
-                }) => {
-                    if !self.tokens.validate(from, &token) {
-                        debug!(
-                            ?info_hash,
-                            ?requester_id,
-                            ?from,
-                            request_type = "announce_signed_peer",
-                            "Invalid token"
-                        );
-
-                        return Some(MessageType::Error(ErrorSpecific {
-                            code: 203,
-                            description: "Bad token".to_string(),
-                        }));
-                    }
-
-                    match SignedAnnounce::from_dht_request(&info_hash, &k, t, &sig) {
-                        Ok(peer) => {
-                            self.signed_peers.add_peer(info_hash, peer);
-
-                            return Some(MessageType::Response(ResponseSpecific::Ping(
-                                PingResponseArguments {
-                                    responder_id: *routing_table.id(),
-                                },
-                            )));
-                        }
-                        Err(error) => {
-                            debug!(
-                                ?info_hash,
-                                ?requester_id,
-                                ?from,
-                                ?error,
-                                request_type = "announce_signed_peer",
-                                "Invalid signed announce"
-                            );
-
-                            return Some(MessageType::Error(ErrorSpecific {
-                                code: 203,
-                                description: error.to_string(),
-                            }));
-                        }
-                    }
                 }
                 PutRequestSpecific::PutImmutable(PutImmutableRequestArguments {
                     v,

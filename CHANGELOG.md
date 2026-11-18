@@ -13,6 +13,9 @@ All notable changes to mainline dht will be documented in this file.
 
 - Removed self-ping reachability detection, `Info::firewalled()`, and automatic
   promotion to server mode. Use `DhtBuilder::mode(Mode::Server)` to explicitly serve.
+- Removed the signed peers extension (`announce_signed_peer`, `get_signed_peers`,
+  the `unstable_signed_peers` feature, the separate routing table and
+  `Info::singing_peers_routing_table_size()`).
 
 ## Added
 

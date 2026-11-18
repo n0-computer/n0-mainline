@@ -100,10 +100,6 @@ fn encode_request(request: &RequestSpecific) -> (&'static [u8], Dict<'_>) {
             a.insert(b"info_hash", id(&args.info_hash));
             b"get_peers"
         }
-        RequestTypeSpecific::GetSignedPeers(args) => {
-            a.insert(b"info_hash", id(&args.info_hash));
-            b"get_signed_peers"
-        }
         RequestTypeSpecific::GetValue(args) => {
             // `salt` is only carried locally, it is not part of the request.
             a.insert(b"target", id(&args.target));
@@ -123,13 +119,6 @@ fn encode_request(request: &RequestSpecific) -> (&'static [u8], Dict<'_>) {
                     let implied_port = args.implied_port.is_some();
                     a.insert(b"implied_port", Value::Int(implied_port.into()));
                     b"announce_peer"
-                }
-                PutRequestSpecific::AnnounceSignedPeer(args) => {
-                    a.insert(b"info_hash", id(&args.info_hash));
-                    a.insert(b"t", Value::Int(args.t as i64));
-                    a.insert(b"k", bytes(&args.k[..]));
-                    a.insert(b"sig", bytes(&args.sig[..]));
-                    b"announce_signed_peer"
                 }
                 PutRequestSpecific::PutImmutable(args) => {
                     a.insert(b"target", id(&args.target));
@@ -170,9 +159,6 @@ fn decode_request(msg: &Dict<'_>) -> Result<RequestSpecific, DecodeMessageError>
         b"get_peers" => RequestTypeSpecific::GetPeers(GetPeersRequestArguments {
             info_hash: get_id(a, "info_hash")?,
         }),
-        b"get_signed_peers" => RequestTypeSpecific::GetSignedPeers(GetPeersRequestArguments {
-            info_hash: get_id(a, "info_hash")?,
-        }),
         b"get" => RequestTypeSpecific::GetValue(GetValueRequestArguments {
             target: get_id(a, "target")?,
             seq: a.opt_int("seq")?,
@@ -183,14 +169,6 @@ fn decode_request(msg: &Dict<'_>) -> Result<RequestSpecific, DecodeMessageError>
                 info_hash: get_id(a, "info_hash")?,
                 port: a.int("port")?,
                 implied_port: a.opt_int::<u8>("implied_port")?.map(|p| p != 0),
-            },
-        ))?,
-        b"announce_signed_peer" => put(PutRequestSpecific::AnnounceSignedPeer(
-            AnnounceSignedPeerRequestArguments {
-                info_hash: get_id(a, "info_hash")?,
-                t: a.int::<i64>("t")? as u64,
-                k: a.array("k")?,
-                sig: a.array("sig")?,
             },
         ))?,
         b"put" => {
@@ -244,12 +222,6 @@ fn encode_response(response: &ResponseSpecific) -> Dict<'_> {
             let values = values.map(|p| bytes(sockaddr_to_bytes(p).to_vec()));
             r.insert(b"values", Value::List(values.collect()));
         }
-        ResponseSpecific::GetSignedPeers(args) => {
-            insert_token_fields(&mut r, &args.responder_id, &args.token, &args.nodes);
-            let peers = args.peers.iter();
-            let peers = peers.map(|p| bytes(signed_peer_to_bytes(p).to_vec()));
-            r.insert(b"peers", Value::List(peers.collect()));
-        }
         ResponseSpecific::NoValues(args) => {
             insert_token_fields(&mut r, &args.responder_id, &args.token, &args.nodes);
         }
@@ -272,7 +244,7 @@ fn encode_response(response: &ResponseSpecific) -> Dict<'_> {
     r
 }
 
-/// Inserts the keys shared by the responses to `get_peers`, `get_signed_peers` and `get`.
+/// Inserts the keys shared by the responses to `get_peers` and `get`.
 fn insert_token_fields<'a>(
     r: &mut Dict<'a>,
     responder_id: &'a Id,
@@ -336,19 +308,6 @@ fn decode_response(r: &Dict<'_>) -> Result<ResponseSpecific, DecodeMessageError>
                     .collect::<Result<_, _>>()?,
                 nodes,
             }));
-        }
-        if let Ok(peers) = r.bytes_list("peers") {
-            return Ok(ResponseSpecific::GetSignedPeers(
-                GetSignedPeersResponseArguments {
-                    responder_id,
-                    token,
-                    peers: peers
-                        .into_iter()
-                        .map(bytes_to_signed_peer)
-                        .collect::<Result<_, _>>()?,
-                    nodes,
-                },
-            ));
         }
         return Ok(ResponseSpecific::NoValues(NoValuesResponseArguments {
             responder_id,
