@@ -8,11 +8,16 @@ All notable changes to mainline dht will be documented in this file.
 
 - Replaced `DhtBuilder::server_mode()` and `Info::server_mode()` with `mode` APIs
   using the non-exhaustive `Mode` enum, which defaults to `Mode::Client`.
+- The KRPC client version is now "N0" plus the crate's major and minor version,
+  instead of "RS" 06, so that upstream nodes no longer expect signed peers support.
 
 ### Removed
 
 - Removed self-ping reachability detection, `Info::firewalled()`, and automatic
   promotion to server mode. Use `DhtBuilder::mode(Mode::Server)` to explicitly serve.
+- Removed the signed peers extension (`announce_signed_peer`, `get_signed_peers`,
+  the `unstable_signed_peers` feature, the separate routing table and
+  `Info::singing_peers_routing_table_size()`).
 
 ## Added
 

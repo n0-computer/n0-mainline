@@ -12,7 +12,6 @@ use put_query::PutQuery;
 
 use crate::common::{
     Id, MAX_BUCKET_SIZE_K, Node, PutMutableRequestArguments, RequestTypeSpecific, RoutingTable,
-    SignedAnnounce,
 };
 use crate::core::iterative_query::GetRequestSpecific;
 use crate::{MutableItem, PutRequestSpecific};
@@ -37,14 +36,28 @@ const MAX_RECENTLY_PINGED: usize = 1000;
 /// Minimum time before we ping the same requester again.
 const REQUESTER_PING_INTERVAL: Duration = Duration::from_secs(10);
 
-pub const VERSION: [u8; 4] = [82, 83, 0, 6]; // "RS" version 06
-//
-pub const VERSIONS_SUPPORTING_SIGNED_PEERS: &[[u8; 4]] = &[
-    // This node
-    VERSION,
-    // Add more nodes as we learn about supporting clients
-    // b"LT.."
+/// Client version sent in every message (`v` in BEP 5): "N0" and the crate's major and minor version.
+///
+/// Not "RS": upstream `mainline` nodes take "RS" 06 or later as support for the
+/// signed peers extension, which this crate does not have.
+pub const VERSION: [u8; 4] = [
+    b'N',
+    b'0',
+    parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
+    parse_u8(env!("CARGO_PKG_VERSION_MINOR")),
 ];
+
+/// Parses a decimal version component at compile time.
+const fn parse_u8(s: &str) -> u8 {
+    let bytes = s.as_bytes();
+    let mut value = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        value = value * 10 + (bytes[i] - b'0');
+        i += 1;
+    }
+    value
+}
 
 #[derive(Debug)]
 /// Side effect free Core, containing all the state and methods necessary
@@ -56,9 +69,6 @@ pub struct Core {
     // Routing
     /// Closest nodes to this node
     pub routing_table: RoutingTable,
-    /// Closest nodes to this node that support the signed peers
-    /// [BEP_????](https://github.com/Nuhvi/mainline/blob/main/beps/bep_signed_peers.rst) proposal.
-    pub signed_peers_routing_table: RoutingTable,
 
     /// Closest responding nodes to specific target
     pub cached_iterative_queries: LruCache<Id, CachedIterativeQuery>,
@@ -94,7 +104,6 @@ impl Core {
         Self {
             bootstrap: bootstrap.into(),
             routing_table: RoutingTable::new(id),
-            signed_peers_routing_table: RoutingTable::new(id),
             iterative_queries: HashMap::new(),
             put_queries: HashMap::new(),
             cached_iterative_queries: LruCache::new(
@@ -158,12 +167,7 @@ impl Core {
                 if !self.bootstrap.is_empty() && table_size == 0 {
                     error!("Could not bootstrap the routing table");
                 } else {
-                    debug!(
-                        ?self_id,
-                        table_size,
-                        signed_peers_table_size = self.signed_peers_routing_table.size(),
-                        "Populated the routing table"
-                    );
+                    debug!(?self_id, table_size, "Populated the routing table");
                 }
             };
 
@@ -175,17 +179,11 @@ impl Core {
                 .cloned()
                 .collect::<Box<[_]>>()
         } else {
-            let relevant_routing_table = choose_relevant_routing_table(
-                query.request.request_type.clone(),
-                &self.routing_table,
-                &self.signed_peers_routing_table,
-            );
-
             query
                 .responders()
                 .take_until_secure(
-                    relevant_routing_table.responders_based_dht_size_estimate(),
-                    relevant_routing_table.average_subnets(),
+                    self.routing_table.responders_based_dht_size_estimate(),
+                    self.routing_table.average_subnets(),
                 )
                 .to_vec()
                 .into_boxed_slice()
@@ -214,23 +212,18 @@ impl Core {
     pub fn check_nodes_to_ping_and_remove_stale_nodes(&mut self) -> Vec<SocketAddrV4> {
         let mut to_ping = vec![];
 
-        for routing_table in [
-            &mut self.routing_table,
-            &mut self.signed_peers_routing_table,
-        ] {
-            let mut to_remove = Vec::with_capacity(routing_table.size());
+        let mut to_remove = Vec::with_capacity(self.routing_table.size());
 
-            for node in routing_table.nodes() {
-                if node.is_stale() {
-                    to_remove.push(*node.id())
-                } else if node.should_ping() {
-                    to_ping.push(node.address())
-                }
+        for node in self.routing_table.nodes() {
+            if node.is_stale() {
+                to_remove.push(*node.id())
+            } else if node.should_ping() {
+                to_ping.push(node.address())
             }
+        }
 
-            for id in to_remove {
-                routing_table.remove(&id);
-            }
+        for id in to_remove {
+            self.routing_table.remove(&id);
         }
 
         to_ping
@@ -288,21 +281,13 @@ impl Core {
         Ok(())
     }
 
-    /// If we are already announcing a signed peer or a mutable item, might as well
+    /// If we are already announcing a mutable item, might as well
     /// return it to the request asking for the same target.
     pub fn check_outgoing_put_request(&self, target: &Id) -> Option<Response> {
         self.put_queries
             .get(target)
             .and_then(|existing| match existing.request.clone() {
                 PutRequestSpecific::PutMutable(request) => Some(Response::Mutable(request.into())),
-                PutRequestSpecific::AnnounceSignedPeer(request) => {
-                    Some(Response::SignedPeers(vec![SignedAnnounce {
-                        key: request.k,
-                        timestamp: request.t,
-                        signature: request.sig,
-                    }]))
-                }
-
                 _ => None,
             })
     }
@@ -374,22 +359,7 @@ impl Core {
     fn get_closest_nodes_from_routing_tables(&self, request: &GetRequestSpecific) -> Vec<Node> {
         let target = request.target();
 
-        match &request {
-            // We don't actually need to use closest secure, because we aren't storing anything
-            // to these nodes, but it is better ask further away than we need, just to add more
-            // randomness and to more likely defeat eclipsing attempts, but we pay the price in
-            // more messages, however that is ok when we rarely call FIND_NODE (once every 15 minutes)
-            GetRequestSpecific::FindNode(_) => {
-                let mut routing_table_closest = self.routing_table.closest_secure(target);
-                routing_table_closest
-                    .extend_from_slice(&self.signed_peers_routing_table.closest_secure(target));
-                routing_table_closest
-            }
-            GetRequestSpecific::GetSignedPeers(_) => {
-                self.signed_peers_routing_table.closest_secure(target)
-            }
-            _ => self.routing_table.closest_secure(target),
-        }
+        self.routing_table.closest_secure(target)
     }
 
     fn update_address_votes_from_iterative_query(&mut self, query: &IterativeQuery) {
@@ -430,13 +400,7 @@ impl Core {
 
         self.decrement_cached_iterative_query_stats(previous);
 
-        let relevant_routing_table = choose_relevant_routing_table_mut(
-            &query.request.request_type,
-            &mut self.routing_table,
-            &mut self.signed_peers_routing_table,
-        );
-
-        relevant_routing_table.increment_responders_stats(
+        self.routing_table.increment_responders_stats(
             dht_size_estimate,
             responders_dht_size_estimate,
             subnets_count,
@@ -446,8 +410,8 @@ impl Core {
         if !matches!(query.request.request_type, RequestTypeSpecific::FindNode(_)) {
             debug!(
                 target = ?query.target(),
-                responders_size_estimate = ?relevant_routing_table.responders_based_dht_size_estimate(),
-                responders_subnets_count = ?relevant_routing_table.average_subnets(),
+                responders_size_estimate = ?self.routing_table.responders_based_dht_size_estimate(),
+                responders_subnets_count = ?self.routing_table.average_subnets(),
                 "Storing nodes stats..",
             );
         }
@@ -469,13 +433,7 @@ impl Core {
                         .decrement_dht_size_estimate(dht_size_estimate);
                 }
                 _ => {
-                    let relevant_routing_table = choose_relevant_routing_table_mut(
-                        &request_type,
-                        &mut self.routing_table,
-                        &mut self.signed_peers_routing_table,
-                    );
-
-                    relevant_routing_table.decrement_responders_stats(
+                    self.routing_table.decrement_responders_stats(
                         dht_size_estimate,
                         responders_dht_size_estimate,
                         subnets,
@@ -484,38 +442,6 @@ impl Core {
             }
         };
     }
-}
-
-fn choose_relevant_routing_table_mut<'a>(
-    request_type: &'a RequestTypeSpecific,
-    basic_routing_table: &'a mut RoutingTable,
-    signed_peers_routing_table: &'a mut RoutingTable,
-) -> &'a mut RoutingTable {
-    match request_type {
-        RequestTypeSpecific::GetSignedPeers(_) => signed_peers_routing_table,
-        _ => basic_routing_table,
-    }
-}
-
-fn choose_relevant_routing_table<'a>(
-    request_type: RequestTypeSpecific,
-    basic_routing_table: &'a RoutingTable,
-    signed_peers_routing_table: &'a RoutingTable,
-) -> &'a RoutingTable {
-    match request_type {
-        RequestTypeSpecific::GetSignedPeers(_) => signed_peers_routing_table,
-        _ => basic_routing_table,
-    }
-}
-
-fn supports_signed_peers(version: Option<[u8; 4]>) -> bool {
-    version
-        .map(|version| {
-            VERSIONS_SUPPORTING_SIGNED_PEERS
-                .iter()
-                .any(|v| version[0..2] == v[0..2] && version[2..] >= v[2..])
-        })
-        .unwrap_or_default()
 }
 
 pub(crate) struct CachedIterativeQuery {
@@ -530,7 +456,19 @@ pub(crate) struct CachedIterativeQuery {
 #[derive(Debug, Clone)]
 pub enum Response {
     Peers(Vec<SocketAddrV4>),
-    SignedPeers(Vec<SignedAnnounce>),
     Immutable(Box<[u8]>),
     Mutable(MutableItem),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_is_n0_and_crate_major_minor() {
+        let mut parts = env!("CARGO_PKG_VERSION").split('.');
+        let major: u8 = parts.next().unwrap().parse().unwrap();
+        let minor: u8 = parts.next().unwrap().parse().unwrap();
+        assert_eq!(VERSION, [b'N', b'0', major, minor]);
+    }
 }

@@ -5,12 +5,11 @@ use tracing::{debug, trace};
 use crate::{
     MutableItem, Node,
     common::{
-        GetImmutableResponseArguments, GetMutableResponseArguments, GetPeersResponseArguments,
-        GetSignedPeersResponseArguments, Id, Message, NoMoreRecentValueResponseArguments,
-        NoValuesResponseArguments, RequestTypeSpecific, ResponseSpecific, SignedAnnounce,
-        messages::MessageType, validate_immutable,
+        GetImmutableResponseArguments, GetMutableResponseArguments, GetPeersResponseArguments, Id,
+        Message, NoMoreRecentValueResponseArguments, NoValuesResponseArguments,
+        RequestTypeSpecific, ResponseSpecific, messages::MessageType, validate_immutable,
     },
-    core::{Response, supports_signed_peers},
+    core::Response,
 };
 
 use super::Core;
@@ -28,7 +27,6 @@ impl Core {
 
         // The socket only hands us responses to our own requests, from the
         // address we sent them to, so the responder exists at that address.
-        let mut should_add_node = true;
         let mut result = None;
         let author_id = message.get_author_id();
         let from_version = message.version.to_owned();
@@ -85,41 +83,6 @@ impl Core {
                     query.response(from, response.clone());
 
                     result = Some((target, response));
-                }
-                MessageType::Response(ResponseSpecific::GetSignedPeers(
-                    GetSignedPeersResponseArguments {
-                        responder_id,
-                        peers,
-                        ..
-                    },
-                )) => {
-                    let mut verified_peers = vec![];
-                    let mut malicious = false;
-
-                    for (k, t, sig) in peers {
-                        if let Ok(peer) = SignedAnnounce::from_dht_response(&target, &k, t, &sig) {
-                            verified_peers.push(peer);
-                        } else {
-                            malicious = true;
-                            break;
-                        }
-                    }
-
-                    if malicious {
-                        debug!(
-                            ?from,
-                            ?responder_id,
-                            ?from_version,
-                            "Invalid signed announce record"
-                        );
-
-                        should_add_node = false;
-                    } else {
-                        let response = Response::SignedPeers(verified_peers);
-                        query.response(from, response.clone());
-
-                        result = Some((target, response));
-                    }
                 }
                 MessageType::Response(ResponseSpecific::GetImmutable(
                     GetImmutableResponseArguments {
@@ -222,12 +185,8 @@ impl Core {
             };
         };
 
-        if should_add_node && let Some(id) = author_id {
+        if let Some(id) = author_id {
             self.routing_table.add(Node::new(id, from));
-
-            if supports_signed_peers(message.version) {
-                self.signed_peers_routing_table.add(Node::new(id, from));
-            }
         }
 
         result
