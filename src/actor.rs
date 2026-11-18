@@ -17,7 +17,7 @@ use crate::common::{
     RequestTypeSpecific,
 };
 use crate::core::{
-    Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
+    Core, PutError, QueryId, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
 
 use socket::{DatagramHook, KrpcSocket};
@@ -30,8 +30,8 @@ pub(crate) struct Actor {
     pub(crate) socket: KrpcSocket,
     core: Core,
 
-    put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
-    get_senders: HashMap<Id, Vec<ResponseSender>>,
+    put_senders: HashMap<QueryId, oneshot::Sender<Result<Id, PutError>>>,
+    get_senders: HashMap<QueryId, Vec<ResponseSender>>,
 
     /// Configured bootstrap hosts, kept so they can be resolved again.
     bootstrap_hosts: Box<[String]>,
@@ -125,17 +125,9 @@ impl Actor {
         }
 
         // Cleanup done PUT query and send a resulting error if any.
-        for (id, error) in done_put_queries {
-            if let Some(senders) = self.put_senders.remove(&id) {
-                let result = if let Some(error) = error {
-                    Err(error)
-                } else {
-                    Ok(id)
-                };
-
-                for sender in senders {
-                    let _ = sender.send(result.clone());
-                }
+        for (id, result) in done_put_queries {
+            if let Some(sender) = self.put_senders.remove(&id) {
+                let _ = sender.send(result);
             }
         }
     }
@@ -145,8 +137,8 @@ impl Actor {
         let new_query_response = self.handle_incoming_message(message, from);
 
         // Response for an ongoing GET query
-        if let Some((target, response)) = new_query_response
-            && let Some(senders) = self.get_senders.get_mut(&target)
+        if let Some((id, response)) = new_query_response
+            && let Some(senders) = self.get_senders.get_mut(&id)
         {
             for sender in senders.iter_mut() {
                 send(sender, response.clone());
@@ -160,28 +152,27 @@ impl Actor {
         &mut self,
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
-    ) -> Result<(), PutError> {
-        self.core.check_concurrency_errors(&request)?;
-
+    ) -> Result<QueryId, PutError> {
         let mut query = PutQuery::new(request.clone(), extra_nodes);
 
         let target = request.target();
         if let Some(closest_nodes) = self.core.get_cached_closest_nodes(target) {
             query.start(&mut self.socket, &closest_nodes)?
         } else {
-            self.get(GetRequestSpecific::from(&request), None);
+            query.lookup_id = Some(self.get(GetRequestSpecific::from(&request), None).0);
         };
 
-        self.core.put_queries.insert(*target, query);
+        let id = self.core.allocate_query_id();
+        self.core.put_queries.insert(id, query);
 
-        Ok(())
+        Ok(id)
     }
 
     /// Send a message to closer and closer nodes until we can't find any more nodes.
     ///
     /// Queries take few seconds to fully traverse the network, once it is done, it will be removed from
-    /// self.iterative_queries. But until then, calling [Actor::get] multiple times, will just return the list
-    /// of responses seen so far.
+    /// self.iterative_queries. Until then, identical requests share the lookup and receive
+    /// the responses seen so far. Different requests use separate internal lookup IDs.
     ///
     /// Effectively, we are caching responses and backing off the network for the duration it takes
     /// to traverse it.
@@ -194,40 +185,33 @@ impl Actor {
         &mut self,
         request: GetRequestSpecific,
         extra_nodes: Option<&[SocketAddrV4]>,
-    ) -> Vec<Response> {
+    ) -> (QueryId, Vec<Response>) {
         let target = request.target();
 
         let mut responses = vec![];
 
-        if let Some(response_from_outgoing_request) = self.core.check_outgoing_put_request(&target)
+        if let Some(response_from_outgoing_request) = self.core.check_outgoing_put_request(&request)
         {
             responses.push(response_from_outgoing_request);
         }
 
-        if let Some(responses_from_active_query) =
-            self.core.check_responses_from_active_query(&target)
-        {
+        if let Some((id, responses_from_active_query)) = self.core.find_active_query(&request) {
             responses.extend_from_slice(responses_from_active_query);
-
-            // Terminate, no need to create another query.
-            return responses;
-        };
-
-        if let Some((mut query, to_visit)) = self.core.create_iterative_query(request, extra_nodes)
-        {
-            let node_id = self.id();
-            if target == *node_id {
-                debug!(?node_id, "Bootstrapping the routing table");
-            }
-
-            for address in to_visit {
-                query.visit(&mut self.socket, address);
-            }
-
-            self.core.iterative_queries.insert(target, query);
+            return (id, responses);
         }
 
-        responses
+        let (id, mut query, to_visit) = self.core.create_iterative_query(request, extra_nodes);
+        let node_id = self.id();
+        if target == *node_id {
+            debug!(?node_id, "Bootstrapping the routing table");
+        }
+
+        for address in to_visit {
+            query.visit(&mut self.socket, address);
+        }
+        self.core.iterative_queries.insert(id, query);
+
+        (id, responses)
     }
 
     // === Private Methods ===
@@ -290,7 +274,7 @@ impl Actor {
         &mut self,
         message: Message,
         from: SocketAddrV4,
-    ) -> Option<(Id, Response)> {
+    ) -> Option<(QueryId, Response)> {
         match message.message_type {
             MessageType::Request(request_specific) => {
                 let response = self
@@ -317,24 +301,24 @@ impl Actor {
         }
     }
 
-    fn check_done_put_queries(&self) -> Vec<(Id, Option<PutError>)> {
+    fn check_done_put_queries(&self) -> Vec<(QueryId, Result<Id, PutError>)> {
         self.core
             .put_queries
             .iter()
             .filter_map(|(id, query)| match query.check(&self.socket) {
                 Ok(done) => {
                     if done {
-                        Some((*id, None))
+                        Some((*id, Ok(query.target)))
                     } else {
                         None
                     }
                 }
-                Err(error) => Some((*id, Some(error))),
+                Err(error) => Some((*id, Err(error))),
             })
             .collect()
     }
 
-    fn check_done_iterative_queries(&self) -> Vec<(Id, Box<[Node]>)> {
+    fn check_done_iterative_queries(&self) -> Vec<(QueryId, Box<[Node]>)> {
         self.core
             .iterative_queries
             .iter()
@@ -354,21 +338,16 @@ impl Actor {
 
     fn start_put_queries(
         &mut self,
-        done_iterative_queries: &[(Id, Box<[Node]>)],
-        done_put_queries: &mut Vec<(Id, Option<PutError>)>,
+        done_iterative_queries: &[(QueryId, Box<[Node]>)],
+        done_put_queries: &mut Vec<(QueryId, Result<Id, PutError>)>,
     ) {
-        for (id, _) in done_iterative_queries {
-            if let Some(put_query) = self.core.put_queries.get_mut(id)
-                && let Err(error) = put_query.start(
-                    &mut self.socket,
-                    done_iterative_queries
-                        .iter()
-                        .find(|(this_id, _)| this_id == id)
-                        .map(|(_, closest_nodes)| closest_nodes)
-                        .expect("done_iterative_queries"),
-                )
-            {
-                done_put_queries.push((*id, Some(error)))
+        for (lookup_id, closest_nodes) in done_iterative_queries {
+            for (id, put_query) in &mut self.core.put_queries {
+                if put_query.lookup_id == Some(*lookup_id)
+                    && let Err(error) = put_query.start(&mut self.socket, closest_nodes)
+                {
+                    done_put_queries.push((*id, Err(error)));
+                }
             }
         }
     }
@@ -418,12 +397,9 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                             let _ = sender.send(actor.info());
                         }
                         ActorMessage::Put(request, sender, extra_nodes) => {
-                            let target = *request.target();
-
                             match actor.put(request, extra_nodes) {
-                                Ok(()) => {
-                                    let senders = actor.put_senders.entry(target).or_default();
-                                    senders.push(sender);
+                                Ok(id) => {
+                                    actor.put_senders.insert(id, sender);
                                 }
                                 Err(error) => {
                                     let _ = sender.send(Err(error));
@@ -431,14 +407,12 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                             };
                         }
                         ActorMessage::Get(request, mut sender) => {
-                            let target = request.target();
-
-                            let responses = actor.get(request, None);
+                            let (id, responses) = actor.get(request, None);
                             for response in responses {
                                 send(&mut sender, response);
                             }
 
-                            let senders = actor.get_senders.entry(target).or_default();
+                            let senders = actor.get_senders.entry(id).or_default();
                             senders.push(sender);
                         }
                         ActorMessage::ToBootstrap(sender) => {
@@ -583,7 +557,7 @@ mod tests {
         actor.core.public_address = Some(public_address);
 
         let ping = Message {
-            transaction_id: 7,
+            transaction_id: 7_u32.to_be_bytes().into(),
             message_type: MessageType::Request(RequestSpecific {
                 requester_id: Id::random(),
                 request_type: RequestTypeSpecific::Ping,
@@ -601,5 +575,229 @@ mod tests {
         assert_eq!(actor.info().mode(), crate::Mode::Client);
         assert_eq!(actor.socket.mode, crate::Mode::Client);
         assert_eq!(*actor.id(), original_id);
+    }
+
+    #[tokio::test]
+    async fn lookups_share_ids_only_for_identical_requests() {
+        use crate::common::{GetPeersRequestArguments, GetValueRequestArguments};
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let target = Id::from([9; 20]);
+        let requests = [
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash: target }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: Some(1),
+                salt: None,
+            }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: Some(Box::from(&b"salt"[..])),
+            }),
+        ];
+        let mut ids = std::collections::HashSet::new();
+        for request in requests {
+            let (id, _) = actor.get(request.clone(), None);
+            assert!(
+                ids.insert(id),
+                "different lookup requests need different IDs"
+            );
+            assert_eq!(
+                actor.get(request, None).0,
+                id,
+                "identical lookups still share work"
+            );
+        }
+        assert_eq!(actor.core.iterative_queries.len(), ids.len());
+    }
+
+    #[tokio::test]
+    async fn put_waits_for_its_own_lookup() {
+        use crate::common::AnnouncePeerRequestArguments;
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let target = Id::from([9; 20]);
+        let (find_id, _) = actor.get(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
+        let put_id = actor
+            .put(
+                PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {
+                    info_hash: target,
+                    port: 1234,
+                    implied_port: None,
+                }),
+                None,
+            )
+            .unwrap();
+        let lookup_id = actor.core.put_queries[&put_id].lookup_id.unwrap();
+        assert_ne!(lookup_id, find_id);
+        let node = Node::new(Id::random(), "127.0.0.1:12345".parse().unwrap());
+        let done_find = [(find_id, vec![node].into_boxed_slice())];
+        let mut done_puts = vec![];
+        actor.start_put_queries(&done_find, &mut done_puts);
+        actor.core.cleanup_done_queries(&done_find, &done_puts);
+        assert!(done_puts.is_empty());
+        assert!(!actor.core.put_queries[&put_id].started());
+        assert!(actor.core.iterative_queries.contains_key(&lookup_id));
+        let node = Node::new_with_token(
+            Id::random(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Box::new([1]),
+        );
+        actor.start_put_queries(
+            &[(lookup_id, vec![node].into_boxed_slice())],
+            &mut done_puts,
+        );
+        assert!(done_puts.is_empty());
+        assert!(actor.core.put_queries[&put_id].started());
+        assert_eq!(actor.core.put_queries[&put_id].lookup_id, None);
+    }
+
+    #[tokio::test]
+    async fn read_results_are_routed_to_their_lookup_id() {
+        use crate::{
+            SigningKey,
+            common::{GetMutableResponseArguments, GetValueRequestArguments, ResponseSpecific},
+        };
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let item = MutableItem::new(&SigningKey::from_bytes(&[7; 32]), b"value", 1, None);
+        let request = |seq| {
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target: *item.target(),
+                seq,
+                salt: None,
+            })
+        };
+        let (all_id, _) = actor.get(request(None), None);
+        let (newer_id, _) = actor.get(request(Some(1)), None);
+        let (all_tx, mut all_rx) = mpsc::unbounded_channel();
+        let (newer_tx, mut newer_rx) = mpsc::unbounded_channel();
+        actor
+            .get_senders
+            .insert(all_id, vec![ResponseSender::Mutable(all_tx)]);
+        actor
+            .get_senders
+            .insert(newer_id, vec![ResponseSender::Mutable(newer_tx)]);
+        let from = "127.0.0.1:12345".parse().unwrap();
+        let tid = actor
+            .core
+            .iterative_queries
+            .get_mut(&all_id)
+            .unwrap()
+            .visit(&mut actor.socket, from);
+        actor.process_message(
+            Message {
+                transaction_id: tid.to_be_bytes().into(),
+                version: None,
+                requester_ip: None,
+                read_only: false,
+                message_type: MessageType::Response(ResponseSpecific::GetMutable(
+                    GetMutableResponseArguments {
+                        responder_id: Id::random(),
+                        token: Box::new([1]),
+                        nodes: None,
+                        v: item.value().into(),
+                        k: *item.key(),
+                        seq: item.seq(),
+                        sig: *item.signature(),
+                    },
+                )),
+            },
+            from,
+        );
+        assert_eq!(all_rx.try_recv().unwrap(), item);
+        assert!(matches!(
+            newer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(actor.get(request(None), None).1.len(), 1);
+        assert!(actor.get(request(Some(1)), None).1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_put_respects_read_sequence_filter() {
+        use crate::{
+            SigningKey,
+            common::{GetValueRequestArguments, PutMutableRequestArguments},
+        };
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let newest = MutableItem::new(&key, b"newest", 2, None);
+        // Insert in reverse sequence order: the result must not depend on map order.
+        for item in [newest.clone(), MutableItem::new(&key, b"older", 1, None)] {
+            actor
+                .put(
+                    PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None)),
+                    None,
+                )
+                .unwrap();
+        }
+        let target = *newest.target();
+        for (seq, expected) in [
+            (None, true),
+            (Some(1), true),
+            (Some(2), false),
+            (Some(3), false),
+        ] {
+            let (_, responses) = actor.get(
+                GetRequestSpecific::GetValue(GetValueRequestArguments {
+                    target,
+                    seq,
+                    salt: None,
+                }),
+                None,
+            );
+            if expected {
+                assert!(
+                    matches!(responses.as_slice(), [Response::Mutable(item)] if item == &newest)
+                );
+            } else {
+                assert!(
+                    responses.is_empty(),
+                    "read filter {seq:?} returned {responses:?}"
+                );
+            }
+        }
+        let (_, responses) = actor.get(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
+        assert!(responses.is_empty());
+        let (_, responses) = actor.get(
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: Some(Box::new([1])),
+            }),
+            None,
+        );
+        assert!(responses.is_empty());
     }
 }

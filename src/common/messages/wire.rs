@@ -5,6 +5,9 @@ use std::borrow::Cow;
 use super::bencode::{self, BencodeError, Dict, Value};
 use super::*;
 
+// Local limit for the opaque KRPC transaction ID, which is echoed in replies.
+const MAX_TRANSACTION_ID_LEN: usize = 32;
+
 fn bytes<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> Value<'a> {
     Value::Bytes(bytes.into())
 }
@@ -24,7 +27,7 @@ fn get_id(dict: &Dict<'_>, key: &'static str) -> Result<Id, BencodeError> {
 impl Message {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut msg = Dict::default();
-        msg.insert(b"t", bytes(self.transaction_id.to_be_bytes().to_vec()));
+        msg.insert(b"t", bytes(&self.transaction_id[..]));
         msg.insert_opt(b"v", self.version.as_ref().map(|v| bytes(&v[..])));
         msg.insert_opt(
             b"ip",
@@ -62,11 +65,11 @@ impl Message {
         let Value::Dict(msg) = bencode::decode(bytes)? else {
             return Err(DecodeMessageError::NotBencodeDictionary);
         };
-        let transaction_id = match *msg.bytes("t")? {
-            [a, b] => u16::from_be_bytes([a, b]).into(),
-            [a, b, c, d] => u32::from_be_bytes([a, b, c, d]),
-            _ => return Err(DecodeMessageError::InvalidTransactionIdSize),
-        };
+        let transaction_id = msg.bytes("t")?;
+        if transaction_id.len() > MAX_TRANSACTION_ID_LEN {
+            return Err(BencodeError::InvalidValue("t").into());
+        }
+        let transaction_id = Box::from(transaction_id);
         let version = msg.opt_array("v")?;
         let requester_ip = msg.opt_array::<6>("ip")?;
         let requester_ip = requester_ip.map(bytes_to_sockaddr).transpose()?;
@@ -121,12 +124,11 @@ fn encode_request(request: &RequestSpecific) -> (&'static [u8], Dict<'_>) {
                     b"announce_peer"
                 }
                 PutRequestSpecific::PutImmutable(args) => {
-                    a.insert(b"target", id(&args.target));
+                    // BEP 44 puts carry no target: the receiver derives it.
                     a.insert(b"v", bytes(&args.v[..]));
                     b"put"
                 }
                 PutRequestSpecific::PutMutable(args) => {
-                    a.insert(b"target", id(&args.target));
                     a.insert(b"v", bytes(&args.v[..]));
                     a.insert(b"k", bytes(&args.k[..]));
                     a.insert(b"seq", Value::Int(args.seq));
@@ -172,7 +174,6 @@ fn decode_request(msg: &Dict<'_>) -> Result<RequestSpecific, DecodeMessageError>
             },
         ))?,
         b"put" => {
-            let target = get_id(a, "target")?;
             let v = Box::from(a.bytes("v")?);
             // All optional keys are checked, even those an immutable put ignores.
             let k = a.opt_array("k")?;
@@ -182,6 +183,7 @@ fn decode_request(msg: &Dict<'_>) -> Result<RequestSpecific, DecodeMessageError>
             let salt = a.opt_bytes("salt")?.map(Box::from);
             put(match k {
                 None => {
+                    let target = crate::common::hash_immutable(&v).into();
                     PutRequestSpecific::PutImmutable(PutImmutableRequestArguments { target, v })
                 }
                 Some(k) => {
@@ -189,7 +191,7 @@ fn decode_request(msg: &Dict<'_>) -> Result<RequestSpecific, DecodeMessageError>
                         return Err(DecodeMessageError::MissingMutablePutSequenceOrSignature);
                     };
                     PutRequestSpecific::PutMutable(PutMutableRequestArguments {
-                        target,
+                        target: crate::MutableItem::target_from_key(&k, salt.as_deref()),
                         v,
                         k,
                         seq,
@@ -344,11 +346,11 @@ mod tests {
     const ID_A: &[u8; 20] = b"abcdefghij0123456789";
     const ID_M: &[u8; 20] = b"mnopqrstuvwxyz123456";
     /// Transaction id `aa` from the BEP 5 examples.
-    const TID: u32 = 0x6161;
+    const TID: &[u8] = b"aa";
 
     fn request(bytes: &[u8]) -> RequestSpecific {
         let msg = Message::from_bytes(bytes).unwrap();
-        assert_eq!(msg.transaction_id, TID);
+        assert_eq!(&*msg.transaction_id, TID);
         match msg.message_type {
             MessageType::Request(request) => Some(request),
             _ => None,
@@ -358,7 +360,7 @@ mod tests {
 
     fn response(bytes: &[u8]) -> ResponseSpecific {
         let msg = Message::from_bytes(bytes).unwrap();
-        assert_eq!(msg.transaction_id, TID);
+        assert_eq!(&*msg.transaction_id, TID);
         match msg.message_type {
             MessageType::Response(response) => Some(response),
             _ => None,
@@ -460,7 +462,7 @@ mod tests {
     fn encode_ping() {
         // Same as the BEP 5 example, plus the `ro` flag we always send.
         let msg = Message {
-            transaction_id: TID,
+            transaction_id: TID.into(),
             version: None,
             requester_ip: None,
             read_only: false,
@@ -471,8 +473,42 @@ mod tests {
         };
         assert_eq!(
             msg.to_bytes(),
-            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping2:roi0e1:t4:\0\0aa1:y1:qe"
+            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping2:roi0e1:t2:aa1:y1:qe"
         );
+    }
+
+    #[test]
+    fn transaction_id_length_limit() {
+        for (prefix, suffix) in [
+            (
+                &b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t"[..],
+                &b"1:y1:qe"[..],
+            ),
+            (
+                &b"d1:rd2:id20:abcdefghij0123456789e1:t"[..],
+                &b"1:y1:re"[..],
+            ),
+            (&b"d1:eli203e3:bade1:t"[..], &b"1:y1:ee"[..]),
+        ] {
+            for len in [0, 1, 2, 4, 32, 33, 2048] {
+                let tid = vec![0xab; len];
+                let mut wire = prefix.to_vec();
+                wire.extend_from_slice(format!("{len}:").as_bytes());
+                wire.extend_from_slice(&tid);
+                wire.extend_from_slice(suffix);
+                let decoded = Message::from_bytes(&wire);
+                if len <= 32 {
+                    assert_eq!(&*decoded.unwrap().transaction_id, &tid);
+                } else {
+                    assert!(matches!(
+                        decoded,
+                        Err(DecodeMessageError::BencodeError(
+                            BencodeError::InvalidValue("t")
+                        ))
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
@@ -487,8 +523,6 @@ mod tests {
         for bytes in [
             // missing transaction id
             &b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:y1:qe"[..],
-            // transaction id of 3 bytes
-            b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t3:aaa1:y1:qe",
             // id of 19 bytes
             b"d1:ad2:id19:abcdefghij012345678e1:q4:ping1:t2:aa1:y1:qe",
             // unknown query
@@ -509,6 +543,42 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(bytes)
             );
+        }
+    }
+
+    #[test]
+    fn bep44_puts_derive_targets() {
+        let immutable =
+            b"d1:ad2:id20:abcdefghij01234567895:token1:x1:v5:helloe1:q3:put1:t2:aa1:y1:qe";
+        let mutable = b"d1:ad2:id20:abcdefghij01234567891:k32:abcdefghijklmnopqrstuvwxyz1234563:seqi1e3:sig64:abcdefghijklmnopqrstuvwxyz123456abcdefghijklmnopqrstuvwxyz1234565:token1:x1:v5:helloe1:q3:put1:t2:aa1:y1:qe";
+        let salted = b"d1:ad2:id20:abcdefghij01234567891:k32:abcdefghijklmnopqrstuvwxyz1234564:salt3:abc3:seqi1e3:sig64:abcdefghijklmnopqrstuvwxyz123456abcdefghijklmnopqrstuvwxyz1234565:token1:x1:v5:helloe1:q3:put1:t2:aa1:y1:qe";
+        let key = b"abcdefghijklmnopqrstuvwxyz123456";
+        for (wire, expected) in [
+            (
+                &immutable[..],
+                crate::common::hash_immutable(b"hello").into(),
+            ),
+            (&mutable[..], crate::MutableItem::target_from_key(key, None)),
+            (
+                &salted[..],
+                crate::MutableItem::target_from_key(key, Some(b"abc")),
+            ),
+        ] {
+            let RequestTypeSpecific::Put(put) = request(wire).request_type else {
+                unreachable!();
+            };
+            assert_eq!(*put.put_request_type.target(), expected);
+            // We send puts the standard way, without a target.
+            let encoded = Message::from_bytes(wire).unwrap().to_bytes();
+            assert!(!encoded.windows(6).any(|w| w == b"target"));
+            // An optional target supplied by an older sender must not override the derived key.
+            let mut legacy = wire.to_vec();
+            let end_of_args = legacy.windows(5).position(|w| w == b"e1:q3").unwrap();
+            legacy.splice(
+                end_of_args..end_of_args,
+                b"6:target20:00000000000000000000".iter().copied(),
+            );
+            assert_eq!(request(&legacy).request_type, RequestTypeSpecific::Put(put));
         }
     }
 }

@@ -5,21 +5,21 @@ use tracing::{debug, trace};
 use crate::{
     MutableItem, Node,
     common::{
-        GetImmutableResponseArguments, GetMutableResponseArguments, GetPeersResponseArguments, Id,
+        GetImmutableResponseArguments, GetMutableResponseArguments, GetPeersResponseArguments,
         Message, NoMoreRecentValueResponseArguments, NoValuesResponseArguments,
         RequestTypeSpecific, ResponseSpecific, messages::MessageType, validate_immutable,
     },
     core::Response,
 };
 
-use super::Core;
+use super::{Core, QueryId};
 
 impl Core {
     pub(crate) fn handle_response(
         &mut self,
         from: SocketAddrV4,
         message: Message,
-    ) -> Option<(Id, Response)> {
+    ) -> Option<(QueryId, Response)> {
         // If someone claims to be readonly, then let's not store anything even if they respond.
         if message.read_only {
             return None;
@@ -27,6 +27,7 @@ impl Core {
 
         // The socket only hands us responses to our own requests, from the
         // address we sent them to, so the responder exists at that address.
+        let transaction_id = u32::from_be_bytes(message.transaction_id.as_ref().try_into().ok()?);
         let mut should_add_node = true;
         let mut result = None;
         let author_id = message.get_author_id();
@@ -36,7 +37,7 @@ impl Core {
         if let Some(query) = self
             .put_queries
             .values_mut()
-            .find(|query| query.inflight(message.transaction_id))
+            .find(|query| query.inflight(transaction_id))
         {
             match message.message_type {
                 MessageType::Response(ResponseSpecific::Ping(_)) => {
@@ -46,10 +47,10 @@ impl Core {
                 MessageType::Error(error) => query.error(error),
                 _ => {}
             };
-        } else if let Some(query) = self
+        } else if let Some((query_id, query)) = self
             .iterative_queries
-            .values_mut()
-            .find(|query| query.inflight(message.transaction_id))
+            .iter_mut()
+            .find(|(_, query)| query.inflight(transaction_id))
         {
             query.responded(from);
 
@@ -83,7 +84,7 @@ impl Core {
                     let response = Response::Peers(values);
                     query.response(from, response.clone());
 
-                    result = Some((target, response));
+                    result = Some((*query_id, response));
                 }
                 MessageType::Response(ResponseSpecific::GetImmutable(
                     GetImmutableResponseArguments {
@@ -94,7 +95,7 @@ impl Core {
                         let response = Response::Immutable(v);
                         query.response(from, response.clone());
 
-                        result = Some((target, response));
+                        result = Some((*query_id, response));
                     } else {
                         debug!(
                             ?v,
@@ -122,14 +123,12 @@ impl Core {
                         RequestTypeSpecific::GetValue(args) => args.salt,
                         _ => None,
                     };
-                    let target = query.target();
-
                     match MutableItem::from_dht_message(query.target(), &k, v, seq, &sig, salt) {
                         Ok(item) => {
                             let response = Response::Mutable(item);
                             query.response(from, response.clone());
 
-                            result = Some((target, response));
+                            result = Some((*query_id, response));
                         }
                         Err(error) => {
                             debug!(
@@ -213,6 +212,7 @@ fn is_local_network(ip: Ipv4Addr) -> bool {
 mod tests {
     use super::*;
     use crate::{
+        Id,
         actor::socket::KrpcSocket,
         common::{
             FindNodeRequestArguments, FindNodeResponseArguments, GetValueRequestArguments,
@@ -232,24 +232,22 @@ mod tests {
         let mut socket = KrpcSocket::client().unwrap();
         let v: Box<[u8]> = Box::from(&b"value"[..]);
         let target = Id::from_bytes(hash_immutable(&v)).unwrap();
-        let (mut query, _) = core
-            .create_iterative_query(
-                GetRequestSpecific::GetValue(GetValueRequestArguments {
-                    target,
-                    seq: None,
-                    salt: None,
-                }),
-                None,
-            )
-            .unwrap();
+        let (id, mut query, _) = core.create_iterative_query(
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+            None,
+        );
         let liar = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
         let honest = SocketAddrV4::new([203, 0, 113, 2].into(), 6881);
         let liar_tid = query.visit(&mut socket, liar);
         let honest_tid = query.visit(&mut socket, honest);
-        core.iterative_queries.insert(target, query);
+        core.iterative_queries.insert(id, query);
 
-        let response = |transaction_id, v| Message {
-            transaction_id,
+        let response = |transaction_id: u32, v| Message {
+            transaction_id: transaction_id.to_be_bytes().into(),
             version: None,
             requester_ip: None,
             read_only: false,
@@ -279,15 +277,13 @@ mod tests {
         );
         let mut socket = KrpcSocket::client().unwrap();
         let target = Id::random();
-        let (mut query, _) = core
-            .create_iterative_query(
-                GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
-                None,
-            )
-            .unwrap();
+        let (id, mut query, _) = core.create_iterative_query(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
         let internet = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
         let tid = query.visit(&mut socket, internet);
-        core.iterative_queries.insert(target, query);
+        core.iterative_queries.insert(id, query);
 
         let public = Node::new(
             Id::random(),
@@ -298,7 +294,7 @@ mod tests {
             SocketAddrV4::new([192, 168, 1, 2].into(), 6881),
         );
         let response = Message {
-            transaction_id: tid,
+            transaction_id: tid.to_be_bytes().into(),
             version: None,
             requester_ip: None,
             read_only: false,
@@ -311,7 +307,7 @@ mod tests {
         };
         core.handle_response(internet, response);
 
-        let closest = core.iterative_queries[&target].closest().nodes();
+        let closest = core.iterative_queries[&id].closest().nodes();
         assert!(closest.contains(&public));
         assert!(!closest.contains(&local));
     }

@@ -102,7 +102,7 @@ impl Node {
 
     /// Node's token was received 5 minutes ago or less
     pub fn valid_token(&self) -> bool {
-        self.0.last_seen.elapsed() <= TOKEN_ROTATE_INTERVAL
+        self.0.token.is_some() && self.0.last_seen.elapsed() <= TOKEN_ROTATE_INTERVAL
     }
 
     pub(crate) fn should_ping(&self) -> bool {
