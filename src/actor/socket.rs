@@ -407,27 +407,24 @@ impl KrpcSocket {
     // === Private Methods ===
 
     fn is_expected_response(&mut self, message: &Message, from: &SocketAddrV4) -> bool {
-        // Positive or an error response or to an inflight request.
-        match self.inflight_requests.remove(message.transaction_id) {
-            Some(request) => {
-                if compare_socket_addr(&request.to, from) {
-                    return true;
-                } else {
-                    trace!(
-                        context = "socket_validation",
-                        message = "Response from wrong address"
-                    );
-                }
-            }
-            None => {
-                trace!(
-                    context = "socket_validation",
-                    message = "Unexpected response id, or timedout request"
-                );
-            }
+        // Positive or an error response to an inflight request. Check the sender before
+        // removing the request, so that nobody else can end it.
+        let Some(request) = self.inflight_requests.peek(message.transaction_id) else {
+            trace!(
+                context = "socket_validation",
+                message = "Unexpected response id, or timedout request"
+            );
+            return false;
+        };
+        if !compare_socket_addr(&request.to, from) {
+            trace!(
+                context = "socket_validation",
+                message = "Response from wrong address"
+            );
+            return false;
         }
-
-        false
+        self.inflight_requests.remove(message.transaction_id);
+        true
     }
 
     /// Set transactin_id, version and read_only
@@ -556,6 +553,13 @@ impl InflightRequests {
         };
 
         None
+    }
+
+    /// Returns the request with this transaction id, whether or not it has timed out.
+    fn peek(&self, key: u32) -> Option<&InflightRequest> {
+        self.find_by_tid(key)
+            .ok()
+            .map(|index| &self.requests[index])
     }
 
     /// Adds a [InflightRequest] with new transaction_id, and returns that id.
@@ -818,7 +822,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-QYMAMPLO"]
     async fn response_from_wrong_address_keeps_request_inflight() {
         let mut server = KrpcSocket::client().unwrap();
         let server_address = SocketAddrV4::new([127, 0, 0, 1].into(), server.local_addr().port());
