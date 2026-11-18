@@ -1,7 +1,7 @@
 //! Manage tokens for remote client IPs.
 
-use crc::{CRC_32_ISCSI, Crc};
 use rand::Rng;
+use sha1_smol::Sha1;
 use std::{
     fmt::{self, Debug, Formatter},
     net::SocketAddrV4,
@@ -12,7 +12,6 @@ use tracing::trace;
 
 const SECRET_SIZE: usize = 20;
 const TOKEN_SIZE: usize = 4;
-const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 /// Tokens generator.
 ///
@@ -77,16 +76,16 @@ impl Tokens {
         address: SocketAddrV4,
         secret: [u8; SECRET_SIZE],
     ) -> [u8; TOKEN_SIZE] {
-        let mut digest = CASTAGNOLI.digest();
+        // A keyed hash, as BEP 5 suggests. A CRC is linear, so the token for one IP would
+        // give away the token for any other.
+        let mut hasher = Sha1::new();
+        hasher.update(&address.ip().octets());
+        hasher.update(&secret);
+        let digest = hasher.digest().bytes();
 
-        let octets: Box<[u8]> = address.ip().octets().into();
-
-        digest.update(&octets);
-        digest.update(&secret);
-
-        let checksum = digest.finalize();
-
-        checksum.to_be_bytes()
+        let mut token = [0; TOKEN_SIZE];
+        token.copy_from_slice(&digest[..TOKEN_SIZE]);
+        token
     }
 }
 
@@ -116,5 +115,29 @@ mod test {
         let token = tokens.generate_token(address);
 
         assert!(tokens.validate(address, &token))
+    }
+
+    #[test]
+    fn token_of_one_ip_does_not_give_the_token_of_another() {
+        use crc::{CRC_32_ISCSI, Crc};
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let mut tokens = Tokens::new();
+        let attacker = SocketAddrV4::new([203, 0, 113, 7].into(), 6881);
+        let victim = SocketAddrV4::new([198, 51, 100, 9].into(), 6881);
+        let token = u32::from_be_bytes(tokens.generate_token(attacker));
+
+        // If the token were crc(ip || secret), this would forge the victim's token without
+        // knowing the secret: for messages of equal length, crc is affine in its input.
+        let mut delta = [0u8; 4 + SECRET_SIZE];
+        for (d, (a, v)) in delta
+            .iter_mut()
+            .zip(attacker.ip().octets().iter().zip(victim.ip().octets()))
+        {
+            *d = a ^ v;
+        }
+        let forged = token ^ crc.checksum(&delta) ^ crc.checksum(&[0; 4 + SECRET_SIZE]);
+
+        assert!(!tokens.validate(victim, &forged.to_be_bytes()));
     }
 }
