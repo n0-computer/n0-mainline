@@ -23,6 +23,9 @@ const MTU: usize = 2048;
 
 const DEFAULT_PORT: u16 = 6881;
 
+/// Fixed deadline for individual outgoing DHT requests, not whole lookups.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Version before supporting `announce_signed_peers`
 #[cfg(test)]
 const LEGACY_VERSION: [u8; 4] = [82, 83, 0, 5]; // "RS" version 05
@@ -198,7 +201,7 @@ impl KrpcSocket {
         Ok(Self {
             io,
             mode: config.mode,
-            inflight_requests: InflightRequests::new(config.request_timeout),
+            inflight_requests: InflightRequests::new(),
             local_addr,
             outbox: VecDeque::new(),
             datagram_hook: None,
@@ -517,15 +520,13 @@ impl Debug for InflightRequest {
 struct InflightRequests {
     next_tid: u32,
     requests: Vec<InflightRequest>,
-    request_timeout: Duration,
 }
 
 impl InflightRequests {
-    fn new(request_timeout: Duration) -> Self {
+    fn new() -> Self {
         Self {
             next_tid: 0,
             requests: Vec::new(),
-            request_timeout,
         }
     }
 
@@ -539,7 +540,7 @@ impl InflightRequests {
     }
 
     fn request_timeout(&self) -> Duration {
-        self.request_timeout
+        REQUEST_TIMEOUT
     }
 
     fn get(&self, key: u32) -> Option<&InflightRequest> {
@@ -814,11 +815,7 @@ mod test {
 
     #[tokio::test]
     async fn inflight_request_timeout() {
-        let mut server = KrpcSocket::new(&Config {
-            request_timeout: Duration::from_millis(20),
-            ..Default::default()
-        })
-        .unwrap();
+        let mut server = KrpcSocket::client().unwrap();
 
         let tid = 8;
         let sent_at = Instant::now();
@@ -864,8 +861,8 @@ mod test {
 
     #[test]
     fn request_timeout_is_fixed_for_fast_and_slow_responses() {
-        let timeout = Duration::from_secs(5);
-        let mut requests = InflightRequests::new(timeout);
+        let timeout = REQUEST_TIMEOUT;
+        let mut requests = InflightRequests::new();
         let address = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
         for age in [
             Duration::ZERO,
@@ -880,9 +877,9 @@ mod test {
     }
 
     #[test]
-    fn configured_timeout_controls_expiration_and_cleanup() {
-        let timeout = Duration::from_secs(20);
-        let mut requests = InflightRequests::new(timeout);
+    fn fixed_timeout_controls_expiration_and_cleanup() {
+        let timeout = REQUEST_TIMEOUT;
+        let mut requests = InflightRequests::new();
         let address = SocketAddrV4::new([127, 0, 0, 1].into(), 1);
         let expired = requests.add(address);
         requests.requests.last_mut().unwrap().sent_at = Instant::now() - timeout * 2;
@@ -916,10 +913,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(
-            server.inflight_requests.request_timeout(),
-            Config::default().request_timeout
-        );
+        assert_eq!(server.inflight_requests.request_timeout(), REQUEST_TIMEOUT);
     }
 
     /// Datagrams that arrive in one GRO batch are handed out one by one.
