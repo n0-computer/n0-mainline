@@ -59,6 +59,9 @@ const fn parse_u8(s: &str) -> u8 {
     value
 }
 
+/// Identifies an internal lookup operation, independently of its DHT target.
+pub(crate) type QueryId = u64;
+
 #[derive(Debug)]
 /// Side effect free Core, containing all the state and methods necessary
 /// for comprehensive and deterministic testing.
@@ -73,7 +76,8 @@ pub struct Core {
     /// Closest responding nodes to specific target
     pub cached_iterative_queries: LruCache<Id, CachedIterativeQuery>,
     /// Active IterativeQueries
-    pub iterative_queries: HashMap<Id, IterativeQuery>,
+    pub iterative_queries: HashMap<QueryId, IterativeQuery>,
+    next_query_id: QueryId,
     /// Put queries are special, since they have to wait for a corresponding
     /// get query to finish, update the closest_nodes, then `query_all` these.
     pub put_queries: HashMap<Id, PutQuery>,
@@ -105,6 +109,7 @@ impl Core {
             bootstrap: bootstrap.into(),
             routing_table: RoutingTable::new(id),
             iterative_queries: HashMap::new(),
+            next_query_id: 0,
             put_queries: HashMap::new(),
             cached_iterative_queries: LruCache::new(
                 NonZeroUsize::new(MAX_CACHED_ITERATIVE_QUERIES)
@@ -193,7 +198,7 @@ impl Core {
     /// Remove completed queries, caching their results and reported public address.
     pub fn cleanup_done_queries(
         &mut self,
-        done_get_queries: &[(Id, Box<[Node]>)],
+        done_get_queries: &[(QueryId, Box<[Node]>)],
         done_put_queries: &[(Id, Option<PutError>)],
     ) {
         for (id, closest_nodes) in done_get_queries {
@@ -292,30 +297,30 @@ impl Core {
             })
     }
 
-    /// If query is still active, no need to create a new one.
-    pub fn check_responses_from_active_query(&self, target: &Id) -> Option<&[Response]> {
-        self.iterative_queries
-            .get(target)
-            .map(|query| query.responses())
+    /// Reuse an active lookup only when its complete request matches.
+    pub fn find_active_query(
+        &self,
+        request: &GetRequestSpecific,
+    ) -> Option<(QueryId, &[Response])> {
+        let request_type = RequestTypeSpecific::from(request.clone());
+        self.iterative_queries.iter().find_map(|(id, query)| {
+            (query.request.request_type == request_type).then_some((*id, query.responses()))
+        })
     }
 
     /// Create an [IterativeQuery] and populate it with candidate nodes, but not insert it to
     /// [Core::iterative_queries] yet.
     ///
-    /// Return the query, and a list of nodes (from our bootstrapping node and/or routing tables)
-    /// to visit to start the query.
+    /// Return its internal ID, the query, and the bootstrap/routing-table nodes to visit
+    /// to start it.
     ///
-    /// Returns `None` if there is an already active query.
+    /// The caller may reuse an existing query with [`Self::find_active_query`].
     pub fn create_iterative_query(
         &mut self,
         request: GetRequestSpecific,
         extra_nodes: Option<&[SocketAddrV4]>,
-    ) -> Option<(IterativeQuery, Vec<SocketAddrV4>)> {
+    ) -> (QueryId, IterativeQuery, Vec<SocketAddrV4>) {
         let target = request.target();
-
-        if self.iterative_queries.contains_key(&target) {
-            return None;
-        }
 
         // We have multiple routing table now, so we should first figure out which one
         // is the appropriate for this query.
@@ -351,7 +356,14 @@ impl Core {
             to_visit.extend_from_slice(extra_nodes);
         }
 
-        Some((query, to_visit))
+        let id = loop {
+            let id = self.next_query_id;
+            self.next_query_id = self.next_query_id.wrapping_add(1);
+            if !self.iterative_queries.contains_key(&id) {
+                break id;
+            }
+        };
+        (id, query, to_visit)
     }
 
     // === Private Methods ===

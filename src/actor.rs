@@ -17,7 +17,7 @@ use crate::common::{
     RequestTypeSpecific,
 };
 use crate::core::{
-    Core, PutError, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
+    Core, PutError, QueryId, Response, iterative_query::GetRequestSpecific, put_query::PutQuery,
 };
 
 use socket::{DatagramHook, KrpcSocket};
@@ -31,7 +31,7 @@ pub(crate) struct Actor {
     core: Core,
 
     put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
-    get_senders: HashMap<Id, Vec<ResponseSender>>,
+    get_senders: HashMap<QueryId, Vec<ResponseSender>>,
 
     /// Configured bootstrap hosts, kept so they can be resolved again.
     bootstrap_hosts: Box<[String]>,
@@ -145,8 +145,8 @@ impl Actor {
         let new_query_response = self.handle_incoming_message(message, from);
 
         // Response for an ongoing GET query
-        if let Some((target, response)) = new_query_response
-            && let Some(senders) = self.get_senders.get_mut(&target)
+        if let Some((id, response)) = new_query_response
+            && let Some(senders) = self.get_senders.get_mut(&id)
         {
             for sender in senders.iter_mut() {
                 send(sender, response.clone());
@@ -169,7 +169,7 @@ impl Actor {
         if let Some(closest_nodes) = self.core.get_cached_closest_nodes(target) {
             query.start(&mut self.socket, &closest_nodes)?
         } else {
-            self.get(GetRequestSpecific::from(&request), None);
+            query.lookup_id = Some(self.get(GetRequestSpecific::from(&request), None).0);
         };
 
         self.core.put_queries.insert(*target, query);
@@ -180,8 +180,8 @@ impl Actor {
     /// Send a message to closer and closer nodes until we can't find any more nodes.
     ///
     /// Queries take few seconds to fully traverse the network, once it is done, it will be removed from
-    /// self.iterative_queries. But until then, calling [Actor::get] multiple times, will just return the list
-    /// of responses seen so far.
+    /// self.iterative_queries. Until then, identical requests share the lookup and receive
+    /// the responses seen so far. Different requests use separate internal lookup IDs.
     ///
     /// Effectively, we are caching responses and backing off the network for the duration it takes
     /// to traverse it.
@@ -194,7 +194,7 @@ impl Actor {
         &mut self,
         request: GetRequestSpecific,
         extra_nodes: Option<&[SocketAddrV4]>,
-    ) -> Vec<Response> {
+    ) -> (QueryId, Vec<Response>) {
         let target = request.target();
 
         let mut responses = vec![];
@@ -204,30 +204,23 @@ impl Actor {
             responses.push(response_from_outgoing_request);
         }
 
-        if let Some(responses_from_active_query) =
-            self.core.check_responses_from_active_query(&target)
-        {
+        if let Some((id, responses_from_active_query)) = self.core.find_active_query(&request) {
             responses.extend_from_slice(responses_from_active_query);
-
-            // Terminate, no need to create another query.
-            return responses;
-        };
-
-        if let Some((mut query, to_visit)) = self.core.create_iterative_query(request, extra_nodes)
-        {
-            let node_id = self.id();
-            if target == *node_id {
-                debug!(?node_id, "Bootstrapping the routing table");
-            }
-
-            for address in to_visit {
-                query.visit(&mut self.socket, address);
-            }
-
-            self.core.iterative_queries.insert(target, query);
+            return (id, responses);
         }
 
-        responses
+        let (id, mut query, to_visit) = self.core.create_iterative_query(request, extra_nodes);
+        let node_id = self.id();
+        if target == *node_id {
+            debug!(?node_id, "Bootstrapping the routing table");
+        }
+
+        for address in to_visit {
+            query.visit(&mut self.socket, address);
+        }
+        self.core.iterative_queries.insert(id, query);
+
+        (id, responses)
     }
 
     // === Private Methods ===
@@ -290,7 +283,7 @@ impl Actor {
         &mut self,
         message: Message,
         from: SocketAddrV4,
-    ) -> Option<(Id, Response)> {
+    ) -> Option<(QueryId, Response)> {
         match message.message_type {
             MessageType::Request(request_specific) => {
                 let response = self
@@ -334,7 +327,7 @@ impl Actor {
             .collect()
     }
 
-    fn check_done_iterative_queries(&self) -> Vec<(Id, Box<[Node]>)> {
+    fn check_done_iterative_queries(&self) -> Vec<(QueryId, Box<[Node]>)> {
         self.core
             .iterative_queries
             .iter()
@@ -354,21 +347,16 @@ impl Actor {
 
     fn start_put_queries(
         &mut self,
-        done_iterative_queries: &[(Id, Box<[Node]>)],
+        done_iterative_queries: &[(QueryId, Box<[Node]>)],
         done_put_queries: &mut Vec<(Id, Option<PutError>)>,
     ) {
-        for (id, _) in done_iterative_queries {
-            if let Some(put_query) = self.core.put_queries.get_mut(id)
-                && let Err(error) = put_query.start(
-                    &mut self.socket,
-                    done_iterative_queries
-                        .iter()
-                        .find(|(this_id, _)| this_id == id)
-                        .map(|(_, closest_nodes)| closest_nodes)
-                        .expect("done_iterative_queries"),
-                )
+        for (id, closest_nodes) in done_iterative_queries {
+            if let Some(lookup) = self.core.iterative_queries.get(id)
+                && let Some(put_query) = self.core.put_queries.get_mut(&lookup.target())
+                && put_query.lookup_id == Some(*id)
+                && let Err(error) = put_query.start(&mut self.socket, closest_nodes)
             {
-                done_put_queries.push((*id, Some(error)))
+                done_put_queries.push((lookup.target(), Some(error)))
             }
         }
     }
@@ -431,14 +419,12 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                             };
                         }
                         ActorMessage::Get(request, mut sender) => {
-                            let target = request.target();
-
-                            let responses = actor.get(request, None);
+                            let (id, responses) = actor.get(request, None);
                             for response in responses {
                                 send(&mut sender, response);
                             }
 
-                            let senders = actor.get_senders.entry(target).or_default();
+                            let senders = actor.get_senders.entry(id).or_default();
                             senders.push(sender);
                         }
                         ActorMessage::ToBootstrap(sender) => {
@@ -601,5 +587,164 @@ mod tests {
         assert_eq!(actor.info().mode(), crate::Mode::Client);
         assert_eq!(actor.socket.mode, crate::Mode::Client);
         assert_eq!(*actor.id(), original_id);
+    }
+
+    #[tokio::test]
+    async fn lookups_share_ids_only_for_identical_requests() {
+        use crate::common::{GetPeersRequestArguments, GetValueRequestArguments};
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let target = Id::from([9; 20]);
+        let requests = [
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            GetRequestSpecific::GetPeers(GetPeersRequestArguments { info_hash: target }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: Some(1),
+                salt: None,
+            }),
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: Some(Box::from(&b"salt"[..])),
+            }),
+        ];
+        let mut ids = std::collections::HashSet::new();
+        for request in requests {
+            let (id, _) = actor.get(request.clone(), None);
+            assert!(
+                ids.insert(id),
+                "different lookup requests need different IDs"
+            );
+            assert_eq!(
+                actor.get(request, None).0,
+                id,
+                "identical lookups still share work"
+            );
+        }
+        assert_eq!(actor.core.iterative_queries.len(), ids.len());
+    }
+
+    #[tokio::test]
+    async fn put_waits_for_its_own_lookup() {
+        use crate::common::AnnouncePeerRequestArguments;
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let target = Id::from([9; 20]);
+        let (find_id, _) = actor.get(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
+        actor
+            .put(
+                PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {
+                    info_hash: target,
+                    port: 1234,
+                    implied_port: None,
+                }),
+                None,
+            )
+            .unwrap();
+        let lookup_id = actor.core.put_queries[&target].lookup_id.unwrap();
+        assert_ne!(lookup_id, find_id);
+        let node = Node::new(Id::random(), "127.0.0.1:12345".parse().unwrap());
+        let done_find = [(find_id, vec![node].into_boxed_slice())];
+        let mut done_puts = vec![];
+        actor.start_put_queries(&done_find, &mut done_puts);
+        actor.core.cleanup_done_queries(&done_find, &done_puts);
+        assert!(done_puts.is_empty());
+        assert!(!actor.core.put_queries[&target].started());
+        assert!(actor.core.iterative_queries.contains_key(&lookup_id));
+        let node = Node::new_with_token(
+            Id::random(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Box::new([1]),
+        );
+        actor.start_put_queries(
+            &[(lookup_id, vec![node].into_boxed_slice())],
+            &mut done_puts,
+        );
+        assert!(done_puts.is_empty());
+        assert!(actor.core.put_queries[&target].started());
+        assert_eq!(actor.core.put_queries[&target].lookup_id, None);
+    }
+
+    #[tokio::test]
+    async fn read_results_are_routed_to_their_lookup_id() {
+        use crate::{
+            SigningKey,
+            common::{GetMutableResponseArguments, GetValueRequestArguments, ResponseSpecific},
+        };
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let item = MutableItem::new(&SigningKey::from_bytes(&[7; 32]), b"value", 1, None);
+        let request = |seq| {
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target: *item.target(),
+                seq,
+                salt: None,
+            })
+        };
+        let (all_id, _) = actor.get(request(None), None);
+        let (newer_id, _) = actor.get(request(Some(1)), None);
+        let (all_tx, mut all_rx) = mpsc::unbounded_channel();
+        let (newer_tx, mut newer_rx) = mpsc::unbounded_channel();
+        actor
+            .get_senders
+            .insert(all_id, vec![ResponseSender::Mutable(all_tx)]);
+        actor
+            .get_senders
+            .insert(newer_id, vec![ResponseSender::Mutable(newer_tx)]);
+        let from = "127.0.0.1:12345".parse().unwrap();
+        let tid = actor
+            .core
+            .iterative_queries
+            .get_mut(&all_id)
+            .unwrap()
+            .visit(&mut actor.socket, from);
+        actor.process_message(
+            Message {
+                transaction_id: tid.to_be_bytes().into(),
+                version: None,
+                requester_ip: None,
+                read_only: false,
+                message_type: MessageType::Response(ResponseSpecific::GetMutable(
+                    GetMutableResponseArguments {
+                        responder_id: Id::random(),
+                        token: Box::new([1]),
+                        nodes: None,
+                        v: item.value().into(),
+                        k: *item.key(),
+                        seq: item.seq(),
+                        sig: *item.signature(),
+                    },
+                )),
+            },
+            from,
+        );
+        assert_eq!(all_rx.try_recv().unwrap(), item);
+        assert!(matches!(
+            newer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(actor.get(request(None), None).1.len(), 1);
+        assert!(actor.get(request(Some(1)), None).1.is_empty());
     }
 }

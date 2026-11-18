@@ -15,6 +15,8 @@ use crate::actor::socket::KrpcSocket;
 /// acknowledging nodes, and or errors.
 pub struct PutQuery {
     pub target: Id,
+    /// The token lookup this put is waiting for, if it has not started yet.
+    pub lookup_id: Option<super::QueryId>,
     /// Nodes that confirmed success
     stored_at: usize,
     inflight_requests: Vec<u32>,
@@ -27,6 +29,7 @@ impl PutQuery {
     pub fn new(request: PutRequestSpecific, extra_nodes: Option<Box<[Node]>>) -> Self {
         Self {
             target: *request.target(),
+            lookup_id: None,
             stored_at: 0,
             inflight_requests: Vec::new(),
             request,
@@ -44,12 +47,9 @@ impl PutQuery {
             return Ok(());
         };
 
+        self.lookup_id = None;
         let target = self.target;
         debug!(?target, closest_secure_nodes = ?closest_nodes.len(), "PutQuery start");
-
-        if closest_nodes.is_empty() {
-            Err(PutQueryError::NoClosestNodes)?;
-        }
 
         for node in closest_nodes.iter().chain(self.extra_nodes.iter()) {
             // Set correct values to the request placeholders
@@ -69,6 +69,9 @@ impl PutQuery {
             }
         }
 
+        if !self.started() {
+            return Err(PutQueryError::NoClosestNodes.into());
+        }
         Ok(())
     }
 
@@ -295,5 +298,36 @@ mod tests {
                 count > 256
             );
         }
+    }
+
+    #[tokio::test]
+    async fn no_usable_tokens_returns_an_error() {
+        use crate::common::PutImmutableRequestArguments;
+        let mut socket = KrpcSocket::new(&Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let node = Node::new(Id::random(), "127.0.0.1:12345".parse().unwrap());
+        let request = PutRequestSpecific::PutImmutable(PutImmutableRequestArguments {
+            target: Id::random(),
+            v: Box::new([1]),
+        });
+        let mut put = PutQuery::new(request.clone(), None);
+        assert!(matches!(
+            put.start(&mut socket, &[node]),
+            Err(PutError::Query(PutQueryError::NoClosestNodes))
+        ));
+        assert!(!put.started());
+        // Extra nodes can supply the usable token even if the lookup found none.
+        let extra = Node::new_with_token(
+            Id::random(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Box::new([1]),
+        );
+        let mut put = PutQuery::new(request, Some(vec![extra].into()));
+        put.start(&mut socket, &[]).unwrap();
+        assert!(put.started());
     }
 }

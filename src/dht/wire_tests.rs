@@ -141,3 +141,81 @@ async fn server_echoes_opaque_transaction_ids_in_responses_and_errors() {
         }
     }
 }
+
+#[tokio::test]
+async fn concurrent_find_and_announce_completes_over_udp() {
+    let target = Id::from([19; 20]);
+    let mut server = KrpcSocket::new(&Config {
+        bootstrap: vec![],
+        port: Some(0),
+        mode: Mode::Server,
+        ..Default::default()
+    })
+    .unwrap();
+    let address =
+        std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, server.local_addr().port());
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let id = Id::from([18; 20]);
+        let mut seen = Some(seen_tx);
+        let mut release = Some(release_rx);
+        loop {
+            for (message, from) in server.recv_batch().await {
+                let MessageType::Request(request) = message.message_type else {
+                    continue;
+                };
+                let response = match request.request_type {
+                    RequestTypeSpecific::FindNode(args) => {
+                        if args.target == target
+                            && let Some(seen) = seen.take()
+                        {
+                            let _ = seen.send(());
+                            let _ = release.take().unwrap().await;
+                        }
+                        ResponseSpecific::FindNode(FindNodeResponseArguments {
+                            responder_id: id,
+                            nodes: vec![Node::new(id, address)].into(),
+                        })
+                    }
+                    RequestTypeSpecific::Put(_) | RequestTypeSpecific::Ping => {
+                        ResponseSpecific::Ping(PingResponseArguments { responder_id: id })
+                    }
+                    _ => ResponseSpecific::NoValues(NoValuesResponseArguments {
+                        responder_id: id,
+                        token: vec![1].into(),
+                        nodes: None,
+                    }),
+                };
+                server.response(from, message.transaction_id, response);
+            }
+            server.flush().await;
+        }
+    });
+    let dht = Dht::builder()
+        .port(0)
+        .bootstrap(&[address.to_string()])
+        .build()
+        .unwrap();
+    let find_dht = dht.clone();
+    let find = tokio::spawn(async move { find_dht.find_node(target).await });
+    tokio::time::timeout(Duration::from_secs(2), seen_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let announce = dht.announce_peer(target, Some(1234));
+    tokio::pin!(announce);
+    // Poll the announce until it is waiting for its reply, then use info as an inbox barrier.
+    assert!(futures::poll!(&mut announce).is_pending());
+    dht.info().await.unwrap();
+    release_tx.send(()).unwrap();
+    let nodes = tokio::time::timeout(Duration::from_secs(2), find)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!nodes.is_empty());
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut announce).await;
+    server_task.abort();
+    assert_eq!(result.expect("announce completes").unwrap(), target);
+}

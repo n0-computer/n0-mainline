@@ -27,7 +27,7 @@ pub(crate) struct IterativeQuery {
     public_address_votes: HashMap<SocketAddrV4, u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GetRequestSpecific {
     FindNode(FindNodeRequestArguments),
     GetPeers(GetPeersRequestArguments),
@@ -70,13 +70,19 @@ impl From<&PutRequestSpecific> for GetRequestSpecific {
     }
 }
 
-impl IterativeQuery {
-    pub fn new(requester_id: Id, target: Id, request: GetRequestSpecific) -> Self {
-        let request_type = match request {
+impl From<GetRequestSpecific> for RequestTypeSpecific {
+    fn from(request: GetRequestSpecific) -> Self {
+        match request {
             GetRequestSpecific::FindNode(s) => RequestTypeSpecific::FindNode(s),
             GetRequestSpecific::GetPeers(s) => RequestTypeSpecific::GetPeers(s),
             GetRequestSpecific::GetValue(s) => RequestTypeSpecific::GetValue(s),
-        };
+        }
+    }
+}
+
+impl IterativeQuery {
+    pub fn new(requester_id: Id, target: Id, request: GetRequestSpecific) -> Self {
+        let request_type = request.into();
 
         trace!(?target, ?request_type, "New Query");
 
