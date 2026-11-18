@@ -5,6 +5,9 @@ use std::borrow::Cow;
 use super::bencode::{self, BencodeError, Dict, Value};
 use super::*;
 
+// Local limit for the opaque KRPC transaction ID, which is echoed in replies.
+const MAX_TRANSACTION_ID_LEN: usize = 32;
+
 fn bytes<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> Value<'a> {
     Value::Bytes(bytes.into())
 }
@@ -62,7 +65,11 @@ impl Message {
         let Value::Dict(msg) = bencode::decode(bytes)? else {
             return Err(DecodeMessageError::NotBencodeDictionary);
         };
-        let transaction_id = Box::from(msg.bytes("t")?);
+        let transaction_id = msg.bytes("t")?;
+        if transaction_id.len() > MAX_TRANSACTION_ID_LEN {
+            return Err(BencodeError::InvalidValue("t").into());
+        }
+        let transaction_id = Box::from(transaction_id);
         let version = msg.opt_array("v")?;
         let requester_ip = msg.opt_array::<6>("ip")?;
         let requester_ip = requester_ip.map(bytes_to_sockaddr).transpose()?;
@@ -471,6 +478,40 @@ mod tests {
             msg.to_bytes(),
             b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping2:roi0e1:t2:aa1:y1:qe"
         );
+    }
+
+    #[test]
+    fn transaction_id_length_limit() {
+        for (prefix, suffix) in [
+            (
+                &b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t"[..],
+                &b"1:y1:qe"[..],
+            ),
+            (
+                &b"d1:rd2:id20:abcdefghij0123456789e1:t"[..],
+                &b"1:y1:re"[..],
+            ),
+            (&b"d1:eli203e3:bade1:t"[..], &b"1:y1:ee"[..]),
+        ] {
+            for len in [0, 1, 2, 4, 32, 33, 2048] {
+                let tid = vec![0xab; len];
+                let mut wire = prefix.to_vec();
+                wire.extend_from_slice(format!("{len}:").as_bytes());
+                wire.extend_from_slice(&tid);
+                wire.extend_from_slice(suffix);
+                let decoded = Message::from_bytes(&wire);
+                if len <= 32 {
+                    assert_eq!(&*decoded.unwrap().transaction_id, &tid);
+                } else {
+                    assert!(matches!(
+                        decoded,
+                        Err(DecodeMessageError::BencodeError(
+                            BencodeError::InvalidValue("t")
+                        ))
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
