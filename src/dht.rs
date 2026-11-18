@@ -508,8 +508,14 @@ impl Dht {
 fn put_error_to_query_error(error: PutError) -> PutQueryError {
     match error {
         PutError::Query(error) => error,
-        PutError::Concurrency(_) => {
-            unreachable!("should not receive a concurrency error from this query type")
+        PutError::Concurrency(error) => {
+            PutQueryError::ErrorResponse(crate::common::ErrorSpecific {
+                code: match error {
+                    ConcurrencyError::CasFailed => 301,
+                    ConcurrencyError::NotMostRecent => 302,
+                },
+                description: error.to_string(),
+            })
         }
     }
 }
@@ -1003,3 +1009,6 @@ mod test {
         assert!(!is_more_recent(&item(1, b"a"), &item(1, b"a")));
     }
 }
+
+#[cfg(test)]
+mod wire_tests;

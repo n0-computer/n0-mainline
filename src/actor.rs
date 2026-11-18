@@ -583,7 +583,7 @@ mod tests {
         actor.core.public_address = Some(public_address);
 
         let ping = Message {
-            transaction_id: 7,
+            transaction_id: 7_u32.to_be_bytes().into(),
             message_type: MessageType::Request(RequestSpecific {
                 requester_id: Id::random(),
                 request_type: RequestTypeSpecific::Ping,

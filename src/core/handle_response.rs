@@ -27,6 +27,7 @@ impl Core {
 
         // The socket only hands us responses to our own requests, from the
         // address we sent them to, so the responder exists at that address.
+        let transaction_id = u32::from_be_bytes(message.transaction_id.as_ref().try_into().ok()?);
         let mut should_add_node = true;
         let mut result = None;
         let author_id = message.get_author_id();
@@ -36,7 +37,7 @@ impl Core {
         if let Some(query) = self
             .put_queries
             .values_mut()
-            .find(|query| query.inflight(message.transaction_id))
+            .find(|query| query.inflight(transaction_id))
         {
             match message.message_type {
                 MessageType::Response(ResponseSpecific::Ping(_)) => {
@@ -49,7 +50,7 @@ impl Core {
         } else if let Some(query) = self
             .iterative_queries
             .values_mut()
-            .find(|query| query.inflight(message.transaction_id))
+            .find(|query| query.inflight(transaction_id))
         {
             query.responded(from);
 
@@ -248,8 +249,8 @@ mod tests {
         let honest_tid = query.visit(&mut socket, honest);
         core.iterative_queries.insert(target, query);
 
-        let response = |transaction_id, v| Message {
-            transaction_id,
+        let response = |transaction_id: u32, v| Message {
+            transaction_id: transaction_id.to_be_bytes().into(),
             version: None,
             requester_ip: None,
             read_only: false,
@@ -298,7 +299,7 @@ mod tests {
             SocketAddrV4::new([192, 168, 1, 2].into(), 6881),
         );
         let response = Message {
-            transaction_id: tid,
+            transaction_id: tid.to_be_bytes().into(),
             version: None,
             requester_ip: None,
             read_only: false,

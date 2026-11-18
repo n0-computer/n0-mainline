@@ -187,13 +187,14 @@ impl PutQuery {
     }
 
     fn most_common_error(&self) -> Option<(u8, PutError)> {
-        self.errors
-            .first()
-            .and_then(|(count, error)| match error.code {
-                301 => Some((*count, PutError::from(ConcurrencyError::CasFailed))),
-                302 => Some((*count, PutError::from(ConcurrencyError::NotMostRecent))),
-                _ => None,
-            })
+        self.errors.first().map(|(count, error)| {
+            let error = match (&self.request, error.code) {
+                (PutRequestSpecific::PutMutable(_), 301) => ConcurrencyError::CasFailed.into(),
+                (PutRequestSpecific::PutMutable(_), 302) => ConcurrencyError::NotMostRecent.into(),
+                _ => PutQueryError::ErrorResponse(error.clone()).into(),
+            };
+            (*count, error)
+        })
     }
 }
 
