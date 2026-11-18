@@ -512,8 +512,10 @@ impl Debug for InflightRequest {
     }
 }
 
-/// We don't need a map, since we know the maximum size is `65536` requests.
-/// Requests are also ordered by their transaction_id and thus sent_at, so lookup is fast.
+/// Requests that are waiting for a response.
+///
+/// Requests are ordered by their transaction_id and thus by sent_at, so a sorted `Vec` is
+/// enough: lookup is a binary search, and timed out requests are a prefix.
 struct InflightRequests {
     next_tid: u32,
     requests: Vec<InflightRequest>,
@@ -618,21 +620,16 @@ impl InflightRequests {
             .binary_search_by(|request| request.tid.cmp(&tid))
     }
 
-    /// Removes timeedout requests if necessary to save memory
+    /// Removes requests that have timed out.
+    ///
+    /// Requests are ordered by `sent_at`, so the timed out ones are a prefix.
     fn cleanup(&mut self) {
-        if self.requests.len() < self.requests.capacity() {
-            return;
-        }
-
-        let index = match self
+        let timeout = self.request_timeout();
+        let now = Instant::now();
+        let expired = self
             .requests
-            .binary_search_by(|request| self.request_timeout().cmp(&request.sent_at.elapsed()))
-        {
-            Ok(index) => index,
-            Err(index) => index,
-        };
-
-        self.requests.drain(0..index);
+            .partition_point(|request| now.duration_since(request.sent_at) >= timeout);
+        self.requests.drain(..expired);
     }
 }
 
@@ -873,7 +870,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-KILP8YTR"]
     async fn timed_out_requests_do_not_accumulate() {
         let mut socket = KrpcSocket::client().unwrap();
         let socket_address = SocketAddrV4::new([127, 0, 0, 1].into(), socket.local_addr().port());
