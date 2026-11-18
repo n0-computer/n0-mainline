@@ -16,10 +16,10 @@ use crate::actor::socket::KrpcSocket;
 pub struct PutQuery {
     pub target: Id,
     /// Nodes that confirmed success
-    stored_at: u8,
+    stored_at: usize,
     inflight_requests: Vec<u32>,
     pub request: PutRequestSpecific,
-    errors: Vec<(u8, ErrorSpecific)>,
+    errors: Vec<(usize, ErrorSpecific)>,
     extra_nodes: Box<[Node]>,
 }
 
@@ -51,11 +51,7 @@ impl PutQuery {
             Err(PutQueryError::NoClosestNodes)?;
         }
 
-        for node in closest_nodes
-            .iter()
-            .take(u8::MAX as usize)
-            .chain(self.extra_nodes.iter())
-        {
+        for node in closest_nodes.iter().chain(self.extra_nodes.iter()) {
             // Set correct values to the request placeholders
             if let Some(token) = node.token() {
                 let tid = socket.request(
@@ -167,7 +163,7 @@ impl PutQuery {
 
     /// Return most common error if any
     fn majority_nodes_rejected_put_mutable(&self) -> Option<ConcurrencyError> {
-        let half = ((self.inflight_requests.len() / 2) + 1) as u8;
+        let half = (self.inflight_requests.len() / 2) + 1;
 
         if matches!(self.request, PutRequestSpecific::PutMutable(_)) {
             return self.most_common_error().and_then(|(count, error)| {
@@ -186,7 +182,7 @@ impl PutQuery {
         None
     }
 
-    fn most_common_error(&self) -> Option<(u8, PutError)> {
+    fn most_common_error(&self) -> Option<(usize, PutError)> {
         self.errors.first().map(|(count, error)| {
             let error = match (&self.request, error.code) {
                 (PutRequestSpecific::PutMutable(_), 301) => ConcurrencyError::CasFailed.into(),
@@ -252,4 +248,52 @@ pub enum ConcurrencyError {
     /// The `CAS` condition does not match the `seq` of the most recent known signed item.
     #[error("CAS check failed, try reading most recent item before writing again.")]
     CasFailed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        MutableItem, SigningKey, actor::config::Config, common::PutMutableRequestArguments,
+    };
+
+    #[tokio::test]
+    async fn large_puts_count_successes_errors_and_majorities() {
+        let mut socket = KrpcSocket::new(&Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let node = Node::new_with_token(
+            Id::random(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Box::new([1]),
+        );
+        let item = MutableItem::new(&SigningKey::from_bytes(&[7; 32]), b"value", 1, None);
+        let request = PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None));
+        let mut success = PutQuery::new(request.clone(), Some(vec![node.clone(); 511].into()));
+        success
+            .start(&mut socket, std::slice::from_ref(&node))
+            .unwrap();
+        assert_eq!(success.inflight_requests.len(), 512);
+        for _ in 0..512 {
+            success.success();
+        }
+        assert_eq!(success.stored_at, 512);
+
+        let mut rejected = PutQuery::new(request, Some(vec![node.clone(); 511].into()));
+        rejected.start(&mut socket, &[node]).unwrap();
+        for count in 1..=257 {
+            rejected.error(ErrorSpecific {
+                code: 301,
+                description: "CAS mismatch".into(),
+            });
+            assert_eq!(rejected.most_common_error().unwrap().0, count);
+            assert_eq!(
+                rejected.majority_nodes_rejected_put_mutable().is_some(),
+                count > 256
+            );
+        }
+    }
 }

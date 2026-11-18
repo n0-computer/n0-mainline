@@ -400,14 +400,15 @@ impl Core {
 
         self.decrement_cached_iterative_query_stats(previous);
 
-        self.routing_table.increment_responders_stats(
-            dht_size_estimate,
-            responders_dht_size_estimate,
-            subnets_count,
-        );
-
-        // Only for get queries, not find node.
-        if !matches!(query.request.request_type, RequestTypeSpecific::FindNode(_)) {
+        if matches!(query.request.request_type, RequestTypeSpecific::FindNode(_)) {
+            self.routing_table
+                .increment_dht_size_estimate(dht_size_estimate);
+        } else {
+            self.routing_table.increment_responders_stats(
+                dht_size_estimate,
+                responders_dht_size_estimate,
+                subnets_count,
+            );
             debug!(
                 target = ?query.target(),
                 responders_size_estimate = ?self.routing_table.responders_based_dht_size_estimate(),
@@ -470,5 +471,57 @@ mod tests {
         let major: u8 = parts.next().unwrap().parse().unwrap();
         let minor: u8 = parts.next().unwrap().parse().unwrap();
         assert_eq!(VERSION, [b'N', b'0', major, minor]);
+    }
+
+    #[test]
+    fn find_node_replacement_and_eviction_preserve_responder_stats() {
+        use crate::common::{FindNodeRequestArguments, GetValueRequestArguments};
+        let mut core = Core::new(
+            Id::random(),
+            vec![],
+            crate::Mode::Client,
+            Default::default(),
+        );
+        let target = Id::from([1; 20]);
+        let node = Node::new(Id::from([2; 20]), "1.1.1.1:6881".parse().unwrap());
+        let mut get = IterativeQuery::new(
+            *core.id(),
+            target,
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+        );
+        get.add_candidate(node.clone());
+        get.add_responding_node(node.clone());
+        core.cache_iterative_query(&get, std::slice::from_ref(&node));
+        let responder_stats = |core: &Core| {
+            (
+                core.routing_table.responders_based_dht_size_estimate(),
+                core.routing_table.average_subnets(),
+            )
+        };
+        let before = responder_stats(&core);
+        let general_before = core.routing_table.dht_size_estimate();
+        let target = Id::from([3; 20]);
+        let mut find = IterativeQuery::new(
+            *core.id(),
+            target,
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+        );
+        find.add_candidate(node);
+        // Replacing the same cached query must not accumulate samples.
+        for _ in 0..3 {
+            core.cache_iterative_query(&find, &[]);
+            assert_eq!(responder_stats(&core), before);
+        }
+        // Move the get to the front so the find_node is evicted by the LRU.
+        let _ = core.cached_iterative_queries.get(&get.target());
+        let (removed_target, removed) = core.cached_iterative_queries.pop_lru().unwrap();
+        assert_eq!(removed_target, target);
+        core.decrement_cached_iterative_query_stats(Some(removed));
+        assert_eq!(responder_stats(&core), before);
+        assert_eq!(core.routing_table.dht_size_estimate(), general_before);
     }
 }
