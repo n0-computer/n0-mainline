@@ -30,7 +30,7 @@ pub(crate) struct Actor {
     pub(crate) socket: KrpcSocket,
     core: Core,
 
-    put_senders: HashMap<Id, Vec<oneshot::Sender<Result<Id, PutError>>>>,
+    put_senders: HashMap<QueryId, oneshot::Sender<Result<Id, PutError>>>,
     get_senders: HashMap<QueryId, Vec<ResponseSender>>,
 
     /// Configured bootstrap hosts, kept so they can be resolved again.
@@ -125,17 +125,9 @@ impl Actor {
         }
 
         // Cleanup done PUT query and send a resulting error if any.
-        for (id, error) in done_put_queries {
-            if let Some(senders) = self.put_senders.remove(&id) {
-                let result = if let Some(error) = error {
-                    Err(error)
-                } else {
-                    Ok(id)
-                };
-
-                for sender in senders {
-                    let _ = sender.send(result.clone());
-                }
+        for (id, result) in done_put_queries {
+            if let Some(sender) = self.put_senders.remove(&id) {
+                let _ = sender.send(result);
             }
         }
     }
@@ -160,9 +152,7 @@ impl Actor {
         &mut self,
         request: PutRequestSpecific,
         extra_nodes: Option<Box<[Node]>>,
-    ) -> Result<(), PutError> {
-        self.core.check_concurrency_errors(&request)?;
-
+    ) -> Result<QueryId, PutError> {
         let mut query = PutQuery::new(request.clone(), extra_nodes);
 
         let target = request.target();
@@ -172,9 +162,10 @@ impl Actor {
             query.lookup_id = Some(self.get(GetRequestSpecific::from(&request), None).0);
         };
 
-        self.core.put_queries.insert(*target, query);
+        let id = self.core.allocate_query_id();
+        self.core.put_queries.insert(id, query);
 
-        Ok(())
+        Ok(id)
     }
 
     /// Send a message to closer and closer nodes until we can't find any more nodes.
@@ -199,7 +190,7 @@ impl Actor {
 
         let mut responses = vec![];
 
-        if let Some(response_from_outgoing_request) = self.core.check_outgoing_put_request(&target)
+        if let Some(response_from_outgoing_request) = self.core.check_outgoing_put_request(&request)
         {
             responses.push(response_from_outgoing_request);
         }
@@ -310,19 +301,19 @@ impl Actor {
         }
     }
 
-    fn check_done_put_queries(&self) -> Vec<(Id, Option<PutError>)> {
+    fn check_done_put_queries(&self) -> Vec<(QueryId, Result<Id, PutError>)> {
         self.core
             .put_queries
             .iter()
             .filter_map(|(id, query)| match query.check(&self.socket) {
                 Ok(done) => {
                     if done {
-                        Some((*id, None))
+                        Some((*id, Ok(query.target)))
                     } else {
                         None
                     }
                 }
-                Err(error) => Some((*id, Some(error))),
+                Err(error) => Some((*id, Err(error))),
             })
             .collect()
     }
@@ -348,15 +339,15 @@ impl Actor {
     fn start_put_queries(
         &mut self,
         done_iterative_queries: &[(QueryId, Box<[Node]>)],
-        done_put_queries: &mut Vec<(Id, Option<PutError>)>,
+        done_put_queries: &mut Vec<(QueryId, Result<Id, PutError>)>,
     ) {
-        for (id, closest_nodes) in done_iterative_queries {
-            if let Some(lookup) = self.core.iterative_queries.get(id)
-                && let Some(put_query) = self.core.put_queries.get_mut(&lookup.target())
-                && put_query.lookup_id == Some(*id)
-                && let Err(error) = put_query.start(&mut self.socket, closest_nodes)
-            {
-                done_put_queries.push((lookup.target(), Some(error)))
+        for (lookup_id, closest_nodes) in done_iterative_queries {
+            for (id, put_query) in &mut self.core.put_queries {
+                if put_query.lookup_id == Some(*lookup_id)
+                    && let Err(error) = put_query.start(&mut self.socket, closest_nodes)
+                {
+                    done_put_queries.push((*id, Err(error)));
+                }
             }
         }
     }
@@ -406,12 +397,9 @@ pub(crate) async fn run(mut actor: Actor, mut receiver: mpsc::Receiver<ActorMess
                             let _ = sender.send(actor.info());
                         }
                         ActorMessage::Put(request, sender, extra_nodes) => {
-                            let target = *request.target();
-
                             match actor.put(request, extra_nodes) {
-                                Ok(()) => {
-                                    let senders = actor.put_senders.entry(target).or_default();
-                                    senders.push(sender);
+                                Ok(id) => {
+                                    actor.put_senders.insert(id, sender);
                                 }
                                 Err(error) => {
                                     let _ = sender.send(Err(error));
@@ -648,7 +636,7 @@ mod tests {
             GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
             None,
         );
-        actor
+        let put_id = actor
             .put(
                 PutRequestSpecific::AnnouncePeer(AnnouncePeerRequestArguments {
                     info_hash: target,
@@ -658,7 +646,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let lookup_id = actor.core.put_queries[&target].lookup_id.unwrap();
+        let lookup_id = actor.core.put_queries[&put_id].lookup_id.unwrap();
         assert_ne!(lookup_id, find_id);
         let node = Node::new(Id::random(), "127.0.0.1:12345".parse().unwrap());
         let done_find = [(find_id, vec![node].into_boxed_slice())];
@@ -666,7 +654,7 @@ mod tests {
         actor.start_put_queries(&done_find, &mut done_puts);
         actor.core.cleanup_done_queries(&done_find, &done_puts);
         assert!(done_puts.is_empty());
-        assert!(!actor.core.put_queries[&target].started());
+        assert!(!actor.core.put_queries[&put_id].started());
         assert!(actor.core.iterative_queries.contains_key(&lookup_id));
         let node = Node::new_with_token(
             Id::random(),
@@ -678,8 +666,8 @@ mod tests {
             &mut done_puts,
         );
         assert!(done_puts.is_empty());
-        assert!(actor.core.put_queries[&target].started());
-        assert_eq!(actor.core.put_queries[&target].lookup_id, None);
+        assert!(actor.core.put_queries[&put_id].started());
+        assert_eq!(actor.core.put_queries[&put_id].lookup_id, None);
     }
 
     #[tokio::test]
@@ -746,5 +734,70 @@ mod tests {
         ));
         assert_eq!(actor.get(request(None), None).1.len(), 1);
         assert!(actor.get(request(Some(1)), None).1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_put_respects_read_sequence_filter() {
+        use crate::{
+            SigningKey,
+            common::{GetValueRequestArguments, PutMutableRequestArguments},
+        };
+        let mut actor = Actor::new(config::Config {
+            bootstrap: vec![],
+            port: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let newest = MutableItem::new(&key, b"newest", 2, None);
+        // Insert in reverse sequence order: the result must not depend on map order.
+        for item in [newest.clone(), MutableItem::new(&key, b"older", 1, None)] {
+            actor
+                .put(
+                    PutRequestSpecific::PutMutable(PutMutableRequestArguments::from(item, None)),
+                    None,
+                )
+                .unwrap();
+        }
+        let target = *newest.target();
+        for (seq, expected) in [
+            (None, true),
+            (Some(1), true),
+            (Some(2), false),
+            (Some(3), false),
+        ] {
+            let (_, responses) = actor.get(
+                GetRequestSpecific::GetValue(GetValueRequestArguments {
+                    target,
+                    seq,
+                    salt: None,
+                }),
+                None,
+            );
+            if expected {
+                assert!(
+                    matches!(responses.as_slice(), [Response::Mutable(item)] if item == &newest)
+                );
+            } else {
+                assert!(
+                    responses.is_empty(),
+                    "read filter {seq:?} returned {responses:?}"
+                );
+            }
+        }
+        let (_, responses) = actor.get(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
+        assert!(responses.is_empty());
+        let (_, responses) = actor.get(
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: Some(Box::new([1])),
+            }),
+            None,
+        );
+        assert!(responses.is_empty());
     }
 }

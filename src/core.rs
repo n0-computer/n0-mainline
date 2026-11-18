@@ -10,9 +10,7 @@ use tracing::error;
 use iterative_query::IterativeQuery;
 use put_query::PutQuery;
 
-use crate::common::{
-    Id, MAX_BUCKET_SIZE_K, Node, PutMutableRequestArguments, RequestTypeSpecific, RoutingTable,
-};
+use crate::common::{Id, MAX_BUCKET_SIZE_K, Node, RequestTypeSpecific, RoutingTable};
 use crate::core::iterative_query::GetRequestSpecific;
 use crate::{MutableItem, PutRequestSpecific};
 
@@ -59,7 +57,7 @@ const fn parse_u8(s: &str) -> u8 {
     value
 }
 
-/// Identifies an internal lookup operation, independently of its DHT target.
+/// Identifies an internal operation, independently of its DHT target.
 pub(crate) type QueryId = u64;
 
 #[derive(Debug)]
@@ -80,7 +78,7 @@ pub struct Core {
     next_query_id: QueryId,
     /// Put queries are special, since they have to wait for a corresponding
     /// get query to finish, update the closest_nodes, then `query_all` these.
-    pub put_queries: HashMap<Id, PutQuery>,
+    pub put_queries: HashMap<QueryId, PutQuery>,
 
     // Time
     /// Last time we refreshed the routing table with a find_node query.
@@ -199,7 +197,7 @@ impl Core {
     pub fn cleanup_done_queries(
         &mut self,
         done_get_queries: &[(QueryId, Box<[Node]>)],
-        done_put_queries: &[(Id, Option<PutError>)],
+        done_put_queries: &[(QueryId, Result<Id, PutError>)],
     ) {
         for (id, closest_nodes) in done_get_queries {
             if let Some(query) = self.iterative_queries.remove(id) {
@@ -234,67 +232,25 @@ impl Core {
         to_ping
     }
 
-    pub fn check_concurrency_errors(
-        &mut self,
-        request: &PutRequestSpecific,
-    ) -> Result<(), ConcurrencyError> {
-        if let PutRequestSpecific::PutMutable(PutMutableRequestArguments {
-            sig,
-            cas,
-            seq,
-            target,
-            ..
-        }) = request
-            && let Some(PutRequestSpecific::PutMutable(inflight_request)) = self
-                .put_queries
-                .get(target)
-                .map(|existing| &existing.request)
-        {
-            debug!(?inflight_request, ?request, "Possible conflict risk");
-
-            if *sig == inflight_request.sig {
-                // Noop, the inflight query is sufficient.
-                return Ok(());
-            } else if *seq <= inflight_request.seq {
-                // this is a bit unclear in the spec. https://www.bittorrent.org/beps/bep_0044.html
-                //
-                // "a node hosting the list node MUST not downgrade a list head from a higher sequence number to a lower one, only upgrade"
-                // Must not downgrade is clear, but it seems to say that equal is also not allowed.
-                //
-                // I checked in libtorrent. What it does is that if it gets the same seq, it just refreshes the old value. This would lead
-                // to the weird situation where you think you have put a new value, but just refreshed the old one. So in this case we don't
-                // allow this at all.
-                //
-                // Note that publishing the same value with the same signature is still allowed.
-                return Err(ConcurrencyError::NotMostRecent);
-            } else if cas.is_none() {
-                // For unconditional puts (`cas: None`), accept the new request as long as
-                // it is not older than the in-flight request.
-                self.put_queries.remove(target);
-            } else if let Some(cas) = cas {
-                if *cas == inflight_request.seq {
-                    // The user is aware of the inflight query and whiches to overrides it.
-                    //
-                    // Remove the inflight request, and create a new one.
-                    self.put_queries.remove(target);
-                } else {
-                    return Err(ConcurrencyError::CasFailed);
-                }
-            };
+    /// Return the newest pending mutable item that satisfies this read.
+    pub fn check_outgoing_put_request(&self, request: &GetRequestSpecific) -> Option<Response> {
+        let GetRequestSpecific::GetValue(read) = request else {
+            return None;
         };
-
-        Ok(())
-    }
-
-    /// If we are already announcing a mutable item, might as well
-    /// return it to the request asking for the same target.
-    pub fn check_outgoing_put_request(&self, target: &Id) -> Option<Response> {
         self.put_queries
-            .get(target)
-            .and_then(|existing| match existing.request.clone() {
-                PutRequestSpecific::PutMutable(request) => Some(Response::Mutable(request.into())),
+            .values()
+            .filter_map(|query| match &query.request {
+                PutRequestSpecific::PutMutable(write)
+                    if write.target == read.target
+                        && write.salt == read.salt
+                        && read.seq.is_none_or(|seq| write.seq > seq) =>
+                {
+                    Some(write)
+                }
                 _ => None,
             })
+            .max_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.v.cmp(&b.v)))
+            .map(|write| Response::Mutable(write.clone().into()))
     }
 
     /// Reuse an active lookup only when its complete request matches.
@@ -356,14 +312,18 @@ impl Core {
             to_visit.extend_from_slice(extra_nodes);
         }
 
-        let id = loop {
+        (self.allocate_query_id(), query, to_visit)
+    }
+
+    /// Allocate an ID distinct from every active read and write.
+    pub fn allocate_query_id(&mut self) -> QueryId {
+        loop {
             let id = self.next_query_id;
             self.next_query_id = self.next_query_id.wrapping_add(1);
-            if !self.iterative_queries.contains_key(&id) {
-                break id;
+            if !self.iterative_queries.contains_key(&id) && !self.put_queries.contains_key(&id) {
+                return id;
             }
-        };
-        (id, query, to_visit)
+        }
     }
 
     // === Private Methods ===

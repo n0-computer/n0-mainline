@@ -1012,3 +1012,6 @@ mod test {
 
 #[cfg(test)]
 mod wire_tests;
+
+#[cfg(test)]
+mod concurrent_write_tests;
