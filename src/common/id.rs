@@ -185,22 +185,10 @@ impl FromStr for Id {
     type Err = DecodeIdError;
 
     fn from_str(s: &str) -> Result<Id, DecodeIdError> {
-        if !s.len().is_multiple_of(2) {
-            return Err(DecodeIdError::OddNumberOfCharacters);
-        }
-
-        let mut bytes = Vec::with_capacity(s.len() / 2);
-
-        for pair in s.as_bytes().as_chunks::<2>().0 {
-            let byte_str = std::str::from_utf8(pair).map_err(|_| {
-                DecodeIdError::InvalidHexCharacter(String::from_utf8_lossy(pair).into_owned())
-            })?;
-            if let Ok(byte) = u8::from_str_radix(byte_str, 16) {
-                bytes.push(byte);
-            } else {
-                return Err(DecodeIdError::InvalidHexCharacter(byte_str.into()));
-            }
-        }
+        let bytes = hex::decode(s).map_err(|err| match err {
+            hex::FromHexError::OddLength => DecodeIdError::OddNumberOfCharacters,
+            _ => DecodeIdError::InvalidHexCharacter(s.into()),
+        })?;
 
         Ok(Id::from_bytes(bytes)?)
     }
