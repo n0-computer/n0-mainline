@@ -18,6 +18,40 @@ cargo run --example cache_bootstrap
 cargo run --example logging
 ```
 
+### Monitor a public server
+
+Run from a machine with a reachable UDP port. Allow inbound UDP on port 6881
+(or use `--port` to choose another port):
+
+```sh
+cargo run --release --example server_monitor | tee server-monitor.log
+```
+
+A temporary client first discovers the public IPv4 address from DHT bootstrap
+replies, then the server uses it to generate its node ID. No extra discovery
+service or dependency is needed. The bootstrap wait has a 20-second timeout;
+if discovery fails, the example exits with an error. Use `--public-ip YOUR_PUBLIC_IPV4`
+to override discovery, for example on a machine with multiple egress addresses.
+Discovery does not open a firewall/NAT port or prove inbound reachability, and it
+uses a separate temporary socket; the server still listens on the configured port.
+
+The server runs for 24 hours, reporting every 60 seconds. Use `--duration-secs`
+and `--interval-secs` to change these, or Ctrl-C to stop early. It bootstraps and
+maintains its routing table automatically; the monitor adds no application lookups.
+
+Each report includes total routing-table entries, non-stale entries, addresses
+added/removed since the previous report, incoming parsed queries, distinct querying
+IPs, and cumulative queries. Query counts and IP counts cover the reporting interval.
+Distinct IP tracking is capped at 10,000 per interval; `query_ips_capped=true` means
+the reported number is a lower bound. These are observed source addresses, not
+verified identities. Address turnover comes from snapshots and can miss changes
+between reports. The first report counts all visible non-stale entries as additions.
+
+Watch for a populated, stable table and sustained incoming queries. Table size alone
+does not establish inbound reachability. Bucket occupancy and exact node ages are
+not exposed by the current API. Diagnostics go to stderr; set `RUST_LOG=info` for
+more logging. Use `--bootstrap host:port,...` to override the default bootstrap hosts.
+
 ### Anounce/GET Peers (to announce Ip/port addresses)
 ```sh
 # Announce as a peer
