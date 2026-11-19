@@ -318,6 +318,69 @@ mod tests {
         assert!(!closest.contains(&local));
     }
 
+    #[tokio::test]
+    #[ignore = "ANT-2026-NWL31505"]
+    async fn made_up_nodes_do_not_hide_real_nodes() {
+        let mut core = Core::new(
+            Id::random(),
+            vec![],
+            crate::Mode::Client,
+            Default::default(),
+        );
+        let mut socket = KrpcSocket::client().unwrap();
+        let target = Id::random();
+        let (id, mut query, _) = core.create_iterative_query(
+            GetRequestSpecific::FindNode(FindNodeRequestArguments { target }),
+            None,
+        );
+        let attacker = SocketAddrV4::new([203, 0, 113, 1].into(), 6881);
+        let honest = SocketAddrV4::new([203, 0, 113, 2].into(), 6881);
+        let attacker_tid = query.visit(&mut socket, attacker);
+        let honest_tid = query.visit(&mut socket, honest);
+        core.iterative_queries.insert(id, query);
+
+        let storage_nodes = [
+            Node::new(
+                Id::random(),
+                SocketAddrV4::new([198, 51, 100, 1].into(), 6881),
+            ),
+            Node::new(
+                Id::random(),
+                SocketAddrV4::new([198, 51, 100, 2].into(), 6881),
+            ),
+        ];
+        let wrong_port_node = Node::new(
+            *storage_nodes[0].id(),
+            SocketAddrV4::new([198, 51, 100, 1].into(), 7777),
+        );
+        let other_ip_node = Node::new(
+            *storage_nodes[1].id(),
+            SocketAddrV4::new([198, 51, 100, 3].into(), 6881),
+        );
+        let response = |transaction_id: u32, nodes: &[Node]| Message {
+            transaction_id: transaction_id.to_be_bytes().into(),
+            version: None,
+            requester_ip: None,
+            read_only: false,
+            message_type: MessageType::Response(ResponseSpecific::FindNode(
+                FindNodeResponseArguments {
+                    responder_id: Id::random(),
+                    nodes: nodes.into(),
+                },
+            )),
+        };
+        core.handle_response(
+            attacker,
+            response(attacker_tid, &[wrong_port_node, other_ip_node]),
+        );
+        core.handle_response(honest, response(honest_tid, &storage_nodes));
+
+        let closest = core.iterative_queries[&id].closest().nodes();
+        for node in &storage_nodes {
+            assert!(closest.contains(node), "{node:?} is not a candidate");
+        }
+    }
+
     #[test]
     fn local_network_addresses() {
         for ip in [
