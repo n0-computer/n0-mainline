@@ -46,13 +46,37 @@ impl ClosestNodes {
 
     /// Add a node.
     pub fn add(&mut self, node: Node) {
-        let seek = node.id().xor(&self.target);
-
         if node.already_exists(&self.nodes) {
             return;
         }
 
-        if let Err(pos) = self.nodes.binary_search_by(|prope| {
+        if let Err(pos) = self.position(&node) {
+            self.nodes.insert(pos, node)
+        }
+    }
+
+    /// Add a node that another node named, dropping only an exact duplicate.
+    ///
+    /// The limits of [Self::add] per IP and per Id would let a made-up node keep out the real
+    /// node with the same IP or the same Id.
+    pub(crate) fn add_unverified(&mut self, node: Node) {
+        if self
+            .nodes
+            .iter()
+            .any(|existing| existing.id() == node.id() && existing.same_address(&node))
+        {
+            return;
+        }
+
+        let (Ok(pos) | Err(pos)) = self.position(&node);
+        self.nodes.insert(pos, node)
+    }
+
+    /// Returns where a node belongs: secure nodes first, then by distance to the target.
+    fn position(&self, node: &Node) -> Result<usize, usize> {
+        let seek = node.id().xor(&self.target);
+
+        self.nodes.binary_search_by(|prope| {
             if prope.is_secure() && !node.is_secure() {
                 std::cmp::Ordering::Less
             } else if !prope.is_secure() && node.is_secure() {
@@ -62,9 +86,7 @@ impl ClosestNodes {
             } else {
                 prope.id().xor(&self.target).cmp(&seek)
             }
-        }) {
-            self.nodes.insert(pos, node)
-        }
+        })
     }
 
     /// Take enough nodes closest to the target, until the following are satisfied:

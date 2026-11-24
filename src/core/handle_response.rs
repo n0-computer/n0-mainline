@@ -53,17 +53,23 @@ impl Core {
             .find(|(_, query)| query.inflight(transaction_id))
         {
             query.responded(from);
+            if let Some(id) = author_id {
+                query.add_answered(Node::new(id, from));
+            }
 
             if let Some(nodes) = message.get_closer_nodes() {
                 // A node on the Internet must not be able to point our requests at our local
                 // network. Nodes in a local network may name each other, so that test networks
                 // and DHTs inside a LAN keep working.
                 let from_local_network = is_local_network(*from.ip());
-                for node in nodes {
-                    if from_local_network || !is_local_network(*node.address().ip()) {
-                        query.add_candidate(node.clone());
-                    }
-                }
+                query.add_named_candidates(
+                    nodes
+                        .iter()
+                        .filter(|node| {
+                            from_local_network || !is_local_network(*node.address().ip())
+                        })
+                        .cloned(),
+                );
             }
 
             if let Some((responder_id, token)) = message.get_token() {
@@ -187,7 +193,7 @@ impl Core {
                     debug!(?error, ?from_version, "Get query got error response");
                 }
                 // Ping response is already handled in add_node()
-                // FindNode response is already handled in query.add_candidate()
+                // FindNode response is already handled in query.add_named_candidates()
                 // Requests are handled elsewhere
                 MessageType::Response(ResponseSpecific::Ping(_))
                 | MessageType::Response(ResponseSpecific::FindNode(_))
@@ -319,7 +325,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "ANT-2026-NWL31505"]
     async fn made_up_nodes_do_not_hide_real_nodes() {
         let mut core = Core::new(
             Id::random(),

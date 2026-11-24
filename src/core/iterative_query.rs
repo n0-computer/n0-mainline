@@ -23,6 +23,8 @@ pub(crate) struct IterativeQuery {
     inflight_requests: Vec<u32>,
     /// Nodes we sent a request to, with its transaction id until they respond.
     visited: HashMap<SocketAddrV4, Option<u32>>,
+    /// Nodes that responded to this query, at the address they responded from.
+    answered: Vec<Node>,
     responses: Vec<Response>,
     public_address_votes: HashMap<SocketAddrV4, u32>,
 }
@@ -97,6 +99,7 @@ impl IterativeQuery {
 
             inflight_requests: Vec::new(),
             visited: HashMap::new(),
+            answered: Vec::new(),
 
             responses: Vec::new(),
 
@@ -141,9 +144,32 @@ impl IterativeQuery {
     // === Public Methods ===
 
     /// Add a candidate node to query on next tick if it is among the closest nodes.
+    ///
+    /// For nodes we already know. Nodes that a response names go through
+    /// [Self::add_named_candidates].
     pub fn add_candidate(&mut self, node: Node) {
         // ready for a ipv6 routing table?
         self.closest.add(node);
+    }
+
+    /// Add the nodes that one response names as candidates.
+    ///
+    /// The limit of one non-secure or eight secure nodes per IP holds only among the nodes of
+    /// this response, so what one response names cannot keep out what another names.
+    pub fn add_named_candidates(&mut self, nodes: impl IntoIterator<Item = Node>) {
+        let mut named: Vec<Node> = Vec::new();
+
+        for node in nodes {
+            if !node.already_exists(&named) {
+                named.push(node.clone());
+                self.closest.add_unverified(node);
+            }
+        }
+    }
+
+    /// Record a node that responded to this query.
+    pub fn add_answered(&mut self, node: Node) {
+        self.answered.push(node);
     }
 
     /// Add a vote for this node's address.
@@ -204,10 +230,15 @@ impl IterativeQuery {
     /// on to a place among the closest nodes and end the query early.
     pub fn closest_candidates(&self, inflight: impl Fn(u32) -> bool) -> Vec<SocketAddrV4> {
         let unresponsive = |address: &SocketAddrV4| matches!(self.visited.get(address), Some(Some(tid)) if !inflight(*tid));
+        // A node that shares its IP with a node that responded is never asked: one non-secure
+        // or eight secure nodes per IP. Like an unresponsive node, it must not hold a place.
+        let crowded = |node: &Node| {
+            !self.visited.contains_key(&node.address()) && node.already_exists(&self.answered)
+        };
         self.closest
             .nodes()
             .iter()
-            .filter(|node| !unresponsive(&node.address()))
+            .filter(|node| !unresponsive(&node.address()) && !crowded(node))
             .take(MAX_BUCKET_SIZE_K)
             .filter(|node| !self.visited.contains_key(&node.address()))
             .map(|node| node.address())
@@ -305,5 +336,71 @@ mod tests {
             query.responded(address);
         }
         assert!(query.closest_candidates(|_| false).is_empty());
+    }
+
+    #[test]
+    fn one_non_secure_node_per_ip_among_named_and_answered_nodes() {
+        let target = Id::random();
+        let mut query = IterativeQuery::new(
+            Id::random(),
+            target,
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+        );
+        let node = |port| {
+            Node::new(
+                Id::from([0; 20]),
+                SocketAddrV4::new([198, 51, 100, 4].into(), port),
+            )
+        };
+        assert!(!node(1).is_secure());
+
+        query.add_named_candidates([node(1), node(2)]);
+        assert_eq!(query.closest_candidates(|_| true), vec![node(1).address()]);
+
+        query.add_answered(node(1));
+        query.add_named_candidates([node(3)]);
+        assert!(query.closest_candidates(|_| true).is_empty());
+    }
+
+    #[test]
+    fn named_nodes_at_an_answered_ip_do_not_hold_places() {
+        let target = Id::from([0x42; 20]);
+        let mut query = IterativeQuery::new(
+            Id::random(),
+            target,
+            GetRequestSpecific::GetValue(GetValueRequestArguments {
+                target,
+                seq: None,
+                salt: None,
+            }),
+        );
+        let mut made_up = vec![];
+        for i in 1..=MAX_BUCKET_SIZE_K as u8 {
+            let mut id = *target.as_bytes();
+            id[0] ^= 0x80 | i;
+            let answered = Node::new(id.into(), SocketAddrV4::new([203, 0, 113, i].into(), 1));
+            assert!(!answered.is_secure());
+            query.add_candidate(answered.clone());
+            query.visited.insert(answered.address(), None);
+            query.add_answered(answered);
+
+            let mut id = *target.as_bytes();
+            id[19] ^= i;
+            made_up.push(Node::new(
+                id.into(),
+                SocketAddrV4::new([203, 0, 113, i].into(), 2),
+            ));
+        }
+        query.add_named_candidates(made_up);
+        let mut id = *target.as_bytes();
+        id[10] ^= 1;
+        let real = SocketAddrV4::new([198, 51, 100, 1].into(), 1);
+        query.add_named_candidates([Node::new(id.into(), real)]);
+
+        assert_eq!(query.closest_candidates(|_| true), vec![real]);
     }
 }
